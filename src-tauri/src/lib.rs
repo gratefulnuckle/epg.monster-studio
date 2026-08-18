@@ -148,11 +148,13 @@ fn lock_audit<'a>(
 }
 
 fn app_root(app: &tauri::AppHandle) -> std::path::PathBuf {
-    app.path()
+    let hint = app
+        .path()
         .resource_dir()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    studio_core::bootstrap::find_app_root(&hint)
 }
 
 #[tauri::command]
@@ -306,6 +308,19 @@ fn promote_main_window(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn detect_bundled_tools(app: tauri::AppHandle) -> Result<usize, String> {
     Ok(detect_bundled(&app_root(&app)).len())
+}
+
+#[tauri::command]
+fn tools_missing(app: tauri::AppHandle) -> Result<Vec<studio_core::bootstrap::ToolSpec>, String> {
+    studio_core::bootstrap::missing_tools(&app_root(&app))
+}
+
+#[tauri::command]
+fn tools_ensure(app: tauri::AppHandle) -> Result<(), String> {
+    let root = app_root(&app);
+    studio_core::bootstrap::ensure(&root, |p| {
+        let _ = app.emit("tools-progress", &p);
+    })
 }
 
 #[tauri::command]
@@ -1782,6 +1797,8 @@ pub fn run() {
             splash_epg_status,
             promote_main_window,
             detect_bundled_tools,
+            tools_missing,
+            tools_ensure,
             list_sources,
             list_groups,
             list_channels,

@@ -18,6 +18,7 @@ pub mod player;
 pub mod settings;
 pub mod store;
 pub mod tools;
+pub mod bootstrap;
 
 pub use info::{DISPLAY_NAME, PRODUCT_ID, USER_AGENT, VERSION};
 pub use models::{ChannelEntry, EpgSuggestion, ManagedChannel, NowPlaying, StreamVariant};

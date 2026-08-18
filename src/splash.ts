@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 type SplashCheck = { label: string; ok: boolean; detail: string };
 type SplashEpg = { catalog: number; programmes: number; cached: boolean };
@@ -34,6 +35,26 @@ export async function runSplash(app: HTMLElement): Promise<void> {
 
   const started = Date.now();
   setProgress(bar, 0);
+
+  try {
+    const missing = await invoke<{ id: string; label: string }[]>("tools_missing");
+    if (missing.length > 0) {
+      status.textContent = "Downloading portable ffmpeg / mpv…";
+      const unlisten = await listen<{ message: string; percent: number }>("tools-progress", (ev) => {
+        status.textContent = ev.payload.message;
+        setProgress(bar, Math.max(1, Math.min(44, ev.payload.percent * 0.45)));
+      });
+      try {
+        await invoke("tools_ensure");
+      } catch {
+        status.textContent = "Tool download failed — you can set paths in Settings.";
+      } finally {
+        unlisten();
+      }
+    }
+  } catch {
+    /* keep going — tools can be set in Settings */
+  }
 
   let checks: SplashCheck[] = [];
   try {
