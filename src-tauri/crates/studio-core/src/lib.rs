@@ -8,6 +8,8 @@ pub mod export;
 pub mod logo;
 pub mod lineup;
 pub mod members;
+pub mod issue;
+pub mod crash;
 pub mod info;
 pub mod models;
 pub mod parser;

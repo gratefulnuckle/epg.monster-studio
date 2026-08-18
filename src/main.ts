@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import "./styles.css";
 import { mountShell } from "./shell";
+import { installCrashHooks, installHideOnMinimize, showPendingCrash, startHeartbeat } from "./crash";
+
+installCrashHooks();
+installHideOnMinimize();
 
 const appEl = document.querySelector<HTMLDivElement>("#app");
 if (!appEl) throw new Error("#app missing");
@@ -58,3 +62,5 @@ async function runSplash(): Promise<void> {
 
 await runSplash();
 mountShell(app);
+startHeartbeat();
+void showPendingCrash(app);

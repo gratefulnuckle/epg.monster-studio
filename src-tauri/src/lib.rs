@@ -28,7 +28,7 @@ use studio_core::tools::{
 use studio_core::{DISPLAY_NAME, VERSION};
 use studio_tuner::manager::{self, TunerManager};
 use studio_tuner::host::TunerSnapshot;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use std::sync::Arc;
 
 struct AppState {
@@ -113,6 +113,26 @@ impl From<ChannelEntry> for ChannelDto {
             tvg_id: c.tvg_id,
             tvg_logo: c.tvg_logo,
             url: c.url,
+        }
+    }
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+fn toggle_main_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        match w.is_visible() {
+            Ok(true) => {
+                let _ = w.hide();
+                studio_core::crash::mark_tray_state();
+            }
+            _ => show_main_window(app),
         }
     }
 }
@@ -870,6 +890,91 @@ fn open_folder(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn consume_pending_crash() -> Option<studio_core::crash::CrashReport> {
+    studio_core::crash::consume_pending_crash()
+}
+
+#[tauri::command]
+fn write_crash_report(
+    kind: String,
+    title: String,
+    summary: String,
+    details: String,
+) -> studio_core::crash::CrashReport {
+    studio_core::crash::append_log("Fatal", "CrashGuard", &title);
+    studio_core::crash::write_crash_report(&kind, &title, &summary, &details, "Exception")
+}
+
+#[tauri::command]
+fn log_heartbeat(visible: bool, tray: bool) {
+    studio_core::crash::append_log(
+        "Trace",
+        "Watch",
+        &format!("heartbeat visible={visible} tray={tray}"),
+    );
+}
+
+#[tauri::command]
+fn mark_tray_state() {
+    studio_core::crash::mark_tray_state();
+}
+
+#[tauri::command]
+fn mark_clean_exit() {
+    studio_core::crash::mark_clean_exit();
+}
+
+#[tauri::command]
+fn post_issue(
+    state: tauri::State<AppState>,
+    kind: String,
+    title: String,
+    summary: String,
+    details: String,
+    notes: Option<String>,
+) -> Result<members::MemberIssueResult, String> {
+    let store = lock_store(&state)?;
+    let settings = store.load_settings().map_err(|e| e.to_string())?;
+    let key = settings.member_access_key.trim().to_string();
+    if key.is_empty() {
+        return Ok(members::MemberIssueResult {
+            message: "Add your access key in Settings → my.epg.monster first.".into(),
+            ..members::MemberIssueResult::default()
+        });
+    }
+    let count = store.managed_count().ok();
+    drop(store);
+    let slug = settings
+        .member_feed_url
+        .rsplit('/')
+        .next()
+        .map(|s| s.trim_end_matches(".gz").to_string())
+        .filter(|s| !s.is_empty());
+    let user = if !settings.member_username.trim().is_empty() {
+        settings.member_username.clone()
+    } else {
+        settings.member_email.clone()
+    };
+    let payload = studio_core::issue::build(
+        &kind,
+        &title,
+        Some(&summary),
+        Some(&details),
+        VERSION,
+        slug.as_deref(),
+        count,
+        notes.as_deref(),
+        Some(&user),
+    );
+    Ok(members::post_issue(
+        &settings.member_api_base,
+        &key,
+        &payload,
+        Some(VERSION),
+    ))
+}
+
+#[tauri::command]
 fn epg_catalog_count(state: tauri::State<AppState>) -> Result<i32, String> {
     lock_store(&state)?.catalog_count().map_err(|e| e.to_string())
 }
@@ -1420,6 +1525,62 @@ pub fn run() {
             audit: Mutex::new(audit_store),
             tuner: Mutex::new(TunerManager::new()),
         })
+        .setup(|app| {
+            studio_core::crash::append_log("Info", "App", "OnLaunched");
+            let menu = tauri::menu::MenuBuilder::new(app)
+                .text("audit", "Add Sources")
+                .text("editor", "Playlist Editor")
+                .text("epg", "EPG Audit")
+                .text("logoaudit", "Logo Audit")
+                .text("autoaudit", "Stream Audit")
+                .text("output", "Managed Output")
+                .text("tuner", "TV Tuner")
+                .text("settings", "Settings")
+                .separator()
+                .text("toggle", "Show / Hide")
+                .text("quit", "Close app")
+                .build()?;
+            let mut tray = tauri::tray::TrayIconBuilder::with_id("main")
+                .tooltip(DISPLAY_NAME)
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| {
+                    match event.id().as_ref() {
+                        "quit" => {
+                            studio_core::crash::mark_clean_exit();
+                            app.exit(0);
+                        }
+                        "toggle" => toggle_main_window(app),
+                        id => {
+                            show_main_window(app);
+                            let _ = app.emit("studio-navigate", id);
+                        }
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        toggle_main_window(tray.app_handle());
+                    }
+                });
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            let _ = tray.build(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+                studio_core::crash::mark_tray_state();
+                let _ = window.app_handle().emit("studio-hidden-to-tray", ());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_studio_info,
             splash_checks,
@@ -1472,6 +1633,12 @@ pub fn run() {
             add_slate,
             remove_slate,
             open_folder,
+            consume_pending_crash,
+            write_crash_report,
+            log_heartbeat,
+            mark_tray_state,
+            mark_clean_exit,
+            post_issue,
             epg_catalog_count,
             epg_guide_url,
             fetch_epg_catalog,

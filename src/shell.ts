@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { api, type Channel, type Source } from "./api";
 import { editorHtml, mountEditor } from "./editor";
 import { epgHtml, mountEpg } from "./epg";
@@ -120,6 +121,10 @@ export function mountShell(root: HTMLElement): void {
   });
 
   render("audit");
+  void listen<string>("studio-navigate", (ev) => {
+    const id = ev.payload as NavId;
+    if (id) render(id);
+  });
 }
 
 async function mountSources(page: HTMLElement, toast: (s: string) => void): Promise<void> {

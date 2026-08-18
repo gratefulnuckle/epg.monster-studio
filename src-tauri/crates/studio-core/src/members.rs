@@ -482,6 +482,61 @@ fn poll_job(api_base: &str, access_key: &str, version: Option<&str>, attempts: i
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberIssueResult {
+    pub ok: bool,
+    pub status_code: i32,
+    pub message: String,
+    pub public_id: Option<String>,
+    pub github_url: Option<String>,
+    pub url: Option<String>,
+}
+
+pub fn post_issue(api_base: &str, access_key: &str, payload: &serde_json::Value, version: Option<&str>) -> MemberIssueResult {
+    let key = access_key.trim();
+    if key.is_empty() {
+        return MemberIssueResult {
+            message: "Add your access key in Settings → my.epg.monster first.".into(),
+            ..MemberIssueResult::default()
+        };
+    }
+    let json = serde_json::to_string(payload).unwrap_or_else(|_| "{}".into());
+    let url = format!("{}/api/member/v1/issues", normalize_base(api_base));
+    match send("POST", &url, key, version, Some(&json), 30) {
+        Ok((code, body)) if (200..300).contains(&code) => {
+            let v = serde_json::from_str::<serde_json::Value>(&body).ok();
+            let id = v.as_ref().and_then(|x| json_str(x, "publicId"));
+            let gh = v.as_ref().and_then(|x| json_str(x, "githubUrl"));
+            let mut message = format!("Report ID: {}", id.as_deref().unwrap_or("?"));
+            if let Some(g) = &gh {
+                message.push_str("\nPublic tracker: ");
+                message.push_str(g);
+            }
+            MemberIssueResult {
+                ok: true,
+                status_code: code as i32,
+                message,
+                public_id: id,
+                github_url: gh,
+                url: v.as_ref().and_then(|x| json_str(x, "url")),
+            }
+        }
+        Ok((code, body)) => {
+            let fail = fail(code as i32, "Issue", &body);
+            MemberIssueResult {
+                status_code: code as i32,
+                message: fail.message,
+                ..MemberIssueResult::default()
+            }
+        }
+        Err(e) => MemberIssueResult {
+            message: e,
+            ..MemberIssueResult::default()
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
