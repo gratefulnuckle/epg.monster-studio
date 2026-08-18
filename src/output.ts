@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { bindVirtualList, type VirtualList } from "./virtual";
 
 export type OutputRow = {
   id: string;
@@ -77,22 +78,30 @@ export function outputHtml(): string {
 export async function mountOutput(page: HTMLElement, toast: (s: string) => void): Promise<void> {
   let filter = "";
   let picks: TunerPickRow[] = [];
+  let rowVirt: VirtualList<OutputRow> | null = null;
 
   const reload = async () => {
     const sum = await invoke<OutputSummary>("output_summary", { filter: filter || null });
-    const el = page.querySelector("#out-rows")!;
+    const el = page.querySelector<HTMLElement>("#out-rows");
+    if (!el) return;
+    rowVirt?.destroy();
     el.innerHTML = "";
-    for (const r of sum.rows) {
-      const row = document.createElement("div");
-      row.className = "output-row";
-      row.innerHTML = `<span class="chan-name">${esc(r.name)}</span>
+    rowVirt = bindVirtualList({
+      scroller: el,
+      rowHeight: 36,
+      renderRow: (r) => {
+        const row = document.createElement("div");
+        row.className = "output-row";
+        row.innerHTML = `<span class="chan-name">${esc(r.name)}</span>
         <span>${esc(r.group)}</span>
         <span>${esc(r.tvgId)}</span>
         <span class="chan-sub" title="${esc(r.visibleUrl)}">${esc(r.visibleUrl)}</span>
         <span>${esc(r.variantsSummary)}</span>
         <span>${esc(r.auditStatus)}</span>`;
-      el.appendChild(row);
-    }
+        return row;
+      },
+    });
+    rowVirt.setItems(sum.rows);
     page.querySelector("#out-summary")!.textContent =
       `${sum.rows.length} channels · ${sum.recentSwaps} recent swaps`;
     (page.querySelector("#out-upload") as HTMLButtonElement).disabled = !sum.hasKey;

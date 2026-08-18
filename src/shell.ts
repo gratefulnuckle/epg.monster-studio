@@ -105,6 +105,8 @@ export function mountShell(root: HTMLElement): { toast: (s: string) => void } {
   const aboutDlg = root.querySelector<HTMLElement>("#about-dlg")!;
 
   const showToast = (text: string) => {
+    // Stale page updates after nav throw this; don't flash it as a studio message.
+    if (/Cannot set propert(?:ies|y) of null/i.test(text)) return;
     toast.textContent = text;
     toast.classList.add("open");
     window.setTimeout(() => toast.classList.remove("open"), 3000);
@@ -271,6 +273,7 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
   const loadGroups = async () => {
     if (!activeId) return;
     const groups = await api.listGroups(activeId);
+    if (!page.querySelector("#source-groups")) return;
     if (!activeGroup || !groups.some((g) => g.title === activeGroup)) {
       activeGroup = groups[0]?.title ?? "";
     }
@@ -333,6 +336,7 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
   const reload = async () => {
     sources = await api.listSources();
     hasManaged = (await api.managedCount()) > 0;
+    if (!page.querySelector("#source-tabs")) return;
     const has = sources.length > 0;
     empty.style.display = has ? "none" : "block";
     workspace.style.display = has ? "grid" : "none";

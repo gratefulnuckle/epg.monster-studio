@@ -131,7 +131,9 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
   const reload = async () => {
     rows = await invoke<AuditRow[]>("epg_audit");
     const n = await invoke<number>("epg_catalog_count");
-    page.querySelector("#epg-count")!.textContent = `${n} catalog ids`;
+    const count = page.querySelector("#epg-count");
+    if (!count) return;
+    count.textContent = `${n} catalog ids`;
     paintGroups();
   };
 
@@ -140,7 +142,8 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
 
   const paintGroups = () => {
     const titles = [...new Set(rows.map((r) => r.groupTitle))];
-    const el = page.querySelector<HTMLElement>("#epg-groups")!;
+    const el = page.querySelector<HTMLElement>("#epg-groups");
+    if (!el) return;
     if (!group && titles[0]) group = titles[0];
     groupVirt?.destroy();
     el.innerHTML = "";
@@ -166,7 +169,8 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
   };
 
   const paintChannels = () => {
-    const el = page.querySelector<HTMLElement>("#epg-channels")!;
+    const el = page.querySelector<HTMLElement>("#epg-channels");
+    if (!el) return;
     const list = rows.filter((r) => r.groupTitle === group && (showMatched || r.status !== "matched"));
     if (!chanVirt) {
       chanVirt = bindVirtualList({

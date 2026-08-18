@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use rusqlite::{params, Connection};
@@ -582,13 +583,47 @@ impl SqliteStore {
                 .filter_map(|r| r.ok())
                 .collect()
         };
-        let mut out = Vec::with_capacity(rows.len());
-        for mut ch in rows {
-            ch.variants = self.get_variants(&ch.id)?;
-            ch.has_epg_match = self.is_known_tvg_id(ch.tvg_id.as_deref());
-            out.push(ch);
-        }
+        let mut out = rows;
+        self.hydrate_managed(&mut out)?;
         Ok(out)
+    }
+
+    /// One variants query + one catalog set instead of N+1 per channel.
+    fn hydrate_managed(&self, channels: &mut [ManagedChannel]) -> Result<(), StoreError> {
+        if channels.is_empty() {
+            return Ok(());
+        }
+        let want: HashSet<&str> = channels.iter().map(|c| c.id.as_str()).collect();
+        let mut by_id: HashMap<String, Vec<StreamVariant>> = HashMap::new();
+        if want.len() == 1 {
+            let id = channels[0].id.clone();
+            by_id.insert(id.clone(), self.get_variants(&id)?);
+        } else {
+            for v in self.list_all_variants()? {
+                if want.contains(v.managed_channel_id.as_str()) {
+                    by_id.entry(v.managed_channel_id.clone()).or_default().push(v);
+                }
+            }
+        }
+        let known = self.catalog_tvg_lower()?;
+        for ch in channels.iter_mut() {
+            ch.variants = by_id.remove(&ch.id).unwrap_or_default();
+            ch.has_epg_match = ch
+                .tvg_id
+                .as_deref()
+                .map(|id| !id.is_empty() && known.contains(&id.to_ascii_lowercase()))
+                .unwrap_or(false);
+        }
+        Ok(())
+    }
+
+    fn catalog_tvg_lower(&self) -> Result<HashSet<String>, StoreError> {
+        let mut stmt = self.conn.prepare("SELECT tvg_id FROM epg_catalog")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows
+            .filter_map(|r| r.ok())
+            .map(|s| s.to_ascii_lowercase())
+            .collect())
     }
 
     pub fn get_managed(&self, id: &str) -> Result<Option<ManagedChannel>, StoreError> {

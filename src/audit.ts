@@ -463,8 +463,11 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
       WeeklyAuditLastRun?: string;
     }>("load_settings");
     delayMs = settings.AuditDelayMs ?? 6000;
-    (page.querySelector("#au-swap") as HTMLInputElement).checked = settings.AutoSwapOnAuditFail !== false;
+    const swap = page.querySelector("#au-swap") as HTMLInputElement | null;
+    if (!swap) return;
+    swap.checked = settings.AutoSwapOnAuditFail !== false;
     const snap = await invoke<AuditSnapshot>("audit_snapshot");
+    if (!page.querySelector("#au-swap")) return;
     applySnap(snap);
     if (snap.interruptedOnLaunch || (snap.job && (snap.job.state === "paused" || snap.job.state === "running") && (snap.job.currentIndex ?? 0) < (snap.job.total ?? 0))) {
       page.querySelector("#au-resume-msg")!.textContent =

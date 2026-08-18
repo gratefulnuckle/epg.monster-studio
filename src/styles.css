@@ -1006,8 +1006,15 @@ input.tvg-ok {
   border: 1px solid var(--studio-stroke);
   border-radius: 8px;
   min-height: 400px;
+  height: calc(100vh - 180px);
   display: flex;
   flex-direction: column;
+}
+
+#out-rows {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .output-head,

@@ -152,8 +152,9 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
 
   const reload = async () => {
     const groups = await invoke<{ title: string; count: number }[]>("list_managed_groups");
-    const gEl = page.querySelector<HTMLElement>("#ed-groups")!;
-    const dl = page.querySelector("#ed-group-list")!;
+    const gEl = page.querySelector<HTMLElement>("#ed-groups");
+    const dl = page.querySelector("#ed-group-list");
+    if (!gEl || !dl) return;
     dl.innerHTML = "";
     let total = 0;
     for (const g of groups) {
@@ -186,14 +187,16 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
         return b;
       },
     });
-    page.querySelector("#ed-count")!.textContent = `${total} channels`;
+    const count = page.querySelector("#ed-count");
+    if (count) count.textContent = `${total} channels`;
     if (!group && groups[0]) group = groups[0].title;
     groupVirt.setItems(groups);
     await loadChannels();
   };
 
   const loadChannels = async () => {
-    const list = page.querySelector<HTMLElement>("#ed-channels")!;
+    const list = page.querySelector<HTMLElement>("#ed-channels");
+    if (!list) return;
     if (!group) {
       chanVirt?.destroy();
       chanVirt = null;
@@ -201,6 +204,7 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       return;
     }
     const chans = await invoke<Managed[]>("list_managed", { group });
+    if (!page.querySelector("#ed-channels")) return;
     if (!chanVirt) {
       chanVirt = bindVirtualList({
         scroller: list,
@@ -234,6 +238,7 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
 
   const select = async (id: string) => {
     selected = (await invoke<Managed | null>("get_managed", { id })) ?? null;
+    if (!page.querySelector("#ed-fields")) return;
     await paintForm();
     await loadChannels();
   };
@@ -312,8 +317,10 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
   };
 
   const paintLogo = () => {
-    const url = (page.querySelector("#ed-logo") as HTMLInputElement).value.trim();
-    const slot = page.querySelector("#ed-logo-preview")!;
+    const logo = page.querySelector("#ed-logo") as HTMLInputElement | null;
+    const slot = page.querySelector("#ed-logo-preview");
+    if (!logo || !slot) return;
+    const url = logo.value.trim();
     if (!url) {
       slot.innerHTML = `<span class="broken">broken logo</span>`;
       return;

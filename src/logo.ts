@@ -109,7 +109,8 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
   let saving = false;
 
   const setStatus = (s: string) => {
-    page.querySelector("#lg-status")!.textContent = s;
+    const el = page.querySelector("#lg-status");
+    if (el) el.textContent = s;
   };
 
   const summarize = () => {
@@ -118,7 +119,8 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
     const invalid = issues.filter((r) => r.issue === "invalid").length;
     const broken = issues.filter((r) => r.issue === "broken").length;
     const reject = issues.filter((r) => r.issue === "player-reject").length;
-    page.querySelector("#lg-summary")!.textContent = `${issues.length} issues`;
+    const summary = page.querySelector("#lg-summary");
+    if (summary) summary.textContent = `${issues.length} issues`;
     setStatus(
       issues.length === 0
         ? "All logos pass a player-style GET (PNG/JPEG/GIF)."
@@ -129,13 +131,15 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
   const reload = async (probe: boolean) => {
     setStatus(probe ? "Probing logos…" : "Loading channels…");
     rows = await invoke<LogoIssue[]>("logo_scan", { probe });
+    if (!page.querySelector("#lg-groups")) return;
     summarize();
     paintGroups();
   };
 
   const paintGroups = () => {
     const titles = [...new Set(rows.map((r) => r.groupTitle))];
-    const el = page.querySelector<HTMLElement>("#lg-groups")!;
+    const el = page.querySelector<HTMLElement>("#lg-groups");
+    if (!el) return;
     if (!group && titles[0]) group = titles[0];
     groupVirt?.destroy();
     el.innerHTML = "";
@@ -161,7 +165,8 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
   };
 
   const paintChannels = () => {
-    const el = page.querySelector<HTMLElement>("#lg-channels")!;
+    const el = page.querySelector<HTMLElement>("#lg-channels");
+    if (!el) return;
     const list = rows.filter((r) => r.groupTitle === group && (!issuesOnly || r.issue));
     if (!chanVirt) {
       chanVirt = bindVirtualList({
