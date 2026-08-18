@@ -82,6 +82,7 @@ export function editorHtml(): string {
       </section>
       <section class="tile editor-pane" id="ed-form">
         <h2>Edit</h2>
+        <p class="page-sub" id="ed-status"></p>
         <p class="page-sub" id="ed-empty">Select a channel.</p>
         <div id="ed-fields" hidden>
           <div class="field"><label>Name</label><input id="ed-name" /></div>
@@ -141,6 +142,7 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
 
   let group = "";
   let selected: Managed | null = null;
+  let draft = false;
 
   const reload = async () => {
     const groups = await invoke<{ title: string; count: number }[]>("list_managed_groups");
@@ -304,10 +306,17 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     const ch = gather();
     if (!ch) return;
     try {
+      const primary = (page.querySelector("#ed-primary") as HTMLInputElement).value.trim();
       await invoke("save_managed", { channel: ch });
+      if (draft && primary) {
+        await invoke("add_stream", { managedId: ch.id, url: primary, label: "primary" });
+        draft = false;
+      }
       toast("Saved.");
       selected = await invoke("get_managed", { id: ch.id });
       group = selected?.groupTitle ?? group;
+      const status = page.querySelector("#ed-status")!;
+      status.textContent = "";
       await reload();
     } catch (e) {
       toast(String(e));
@@ -463,8 +472,44 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     }
   }
 
+  const beginDraft = (entry: { id: string; name: string; groupTitle: string; tvgId?: string | null; tvgLogo?: string | null; url: string }) => {
+    draft = true;
+    selected = {
+      id: crypto.randomUUID().replace(/-/g, ""),
+      name: entry.name,
+      groupTitle: "Unassigned",
+      tvgId: entry.tvgId ?? null,
+      tvgLogo: entry.tvgLogo ?? null,
+      notes: null,
+      sortOrder: 0,
+      tvgShiftHours: 0,
+      inTuner: false,
+      tunerNumber: null,
+      variants: [
+        {
+          id: "draft-primary",
+          managedChannelId: "",
+          url: entry.url,
+          label: "primary",
+          visibility: "visible",
+          priority: 0,
+        },
+      ],
+      hasEpgMatch: false,
+    };
+    page.querySelector("#ed-status")!.textContent =
+      "New channel draft — set the group, then Save channel.";
+    void paintForm();
+    (page.querySelector("#ed-group") as HTMLInputElement).focus();
+  };
+
   try {
     await reload();
+    const raw = sessionStorage.getItem("studio-editor-draft");
+    if (raw) {
+      sessionStorage.removeItem("studio-editor-draft");
+      beginDraft(JSON.parse(raw));
+    }
   } catch (e) {
     toast(String(e));
   }

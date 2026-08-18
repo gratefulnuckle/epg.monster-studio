@@ -412,6 +412,31 @@ fn play_url(
 }
 
 #[tauri::command]
+fn refresh_source(state: tauri::State<AppState>, source_id: String) -> Result<SourceDto, String> {
+    let cache = app_data_directory().join("cache");
+    lock_store(&state)?
+        .refresh_source(&source_id, &cache)
+        .map(SourceDto::from)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_backup_from_source(
+    state: tauri::State<AppState>,
+    managed_id: String,
+    entry_id: String,
+) -> Result<String, String> {
+    lock_store(&state)?
+        .add_backup_from_entry(&managed_id, &entry_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn managed_count(state: tauri::State<AppState>) -> Result<i32, String> {
+    lock_store(&state)?.managed_count().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn list_managed_groups(state: tauri::State<AppState>) -> Result<Vec<GroupDto>, String> {
     Ok(lock_store(&state)?
         .managed_groups()
@@ -1692,6 +1717,9 @@ pub fn run() {
             pick_source_file,
             add_source_url,
             play_url,
+            refresh_source,
+            add_backup_from_source,
+            managed_count,
             list_managed_groups,
             list_managed,
             get_managed,

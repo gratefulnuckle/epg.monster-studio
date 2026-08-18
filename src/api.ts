@@ -31,4 +31,10 @@ export const api = {
   addSourceUrl: (url: string, name?: string, headers?: Record<string, string>) =>
     invoke<Source>("add_source_url", { args: { url, name, headers } }),
   playUrl: (url: string, sourceId?: string) => invoke<void>("play_url", { url, sourceId }),
+  refreshSource: (sourceId: string) => invoke<Source>("refresh_source", { sourceId }),
+  managedCount: () => invoke<number>("managed_count"),
+  addBackupFromSource: (managedId: string, entryId: string) =>
+    invoke<string>("add_backup_from_source", { managedId, entryId }),
+  listManaged: (group?: string) =>
+    invoke<{ id: string; name: string; groupTitle: string }[]>("list_managed", { group }),
 };

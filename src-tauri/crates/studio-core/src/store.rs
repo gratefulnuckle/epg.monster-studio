@@ -326,6 +326,11 @@ impl SqliteStore {
     pub fn remove_source(&self, source_id: &str) -> Result<(), StoreError> {
         self.conn
             .execute("DELETE FROM sources WHERE id = ?1", params![source_id])?;
+        self.rebuild_channel_fts()?;
+        Ok(())
+    }
+
+    fn rebuild_channel_fts(&self) -> Result<(), StoreError> {
         self.conn.execute_batch(
             r#"
             DELETE FROM channel_fts;
@@ -334,6 +339,47 @@ impl SqliteStore {
             "#,
         )?;
         Ok(())
+    }
+
+    pub fn refresh_source(&self, source_id: &str, cache_dir: &Path) -> Result<PlaylistSource, StoreError> {
+        let src = self
+            .list_sources()?
+            .into_iter()
+            .find(|s| s.id == source_id)
+            .ok_or_else(|| StoreError::Io(std::io::Error::other("source not found")))?;
+        let content = if src.kind == "url" {
+            std::fs::create_dir_all(cache_dir)?;
+            let headers: std::collections::BTreeMap<String, String> =
+                serde_json::from_str(&src.headers_json).unwrap_or_default();
+            let mut req = ureq::get(&src.location);
+            for (k, v) in &headers {
+                req = req.set(k, v);
+            }
+            let body = req
+                .call()
+                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?
+                .into_string()
+                .map_err(StoreError::Io)?;
+            let cache_path = cache_dir.join(format!("{}.m3u", src.id));
+            std::fs::write(&cache_path, &body)?;
+            body
+        } else {
+            std::fs::read_to_string(&src.location)?
+        };
+        self.conn
+            .execute("DELETE FROM channel_entries WHERE source_id = ?1", params![source_id])?;
+        let channels = parse_m3u(&content, source_id);
+        self.insert_channels(&channels)?;
+        self.rebuild_channel_fts()?;
+        let loaded_at = chrono_like_now();
+        self.conn.execute(
+            "UPDATE sources SET channel_count = ?1, loaded_at = ?2 WHERE id = ?3",
+            params![channels.len() as i32, loaded_at, source_id],
+        )?;
+        Ok(PlaylistSource {
+            channel_count: channels.len() as i32,
+            ..src
+        })
     }
 
     pub fn managed_count(&self) -> Result<i32, StoreError> {
@@ -716,6 +762,45 @@ impl SqliteStore {
         };
         self.upsert_variant(&v)?;
         Ok(v)
+    }
+
+    pub fn add_backup_from_entry(
+        &self,
+        managed_id: &str,
+        entry_id: &str,
+    ) -> Result<String, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_id, group_title, name, tvg_id, tvg_name, tvg_logo, url, attrs_json, line_no
+             FROM channel_entries WHERE id = ?1",
+        )?;
+        let entry = read_channels(&mut stmt, params![entry_id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StoreError::Io(std::io::Error::other("source row not found")))?;
+        let ch = self
+            .get_managed(managed_id)?
+            .ok_or_else(|| StoreError::Io(std::io::Error::other("channel not found")))?;
+        if ch
+            .variants
+            .iter()
+            .any(|v| v.url.eq_ignore_ascii_case(&entry.url))
+        {
+            return Err(StoreError::Io(std::io::Error::other(format!(
+                "Already on {}",
+                ch.name
+            ))));
+        }
+        let label = if entry.name.trim().is_empty() {
+            "backup"
+        } else {
+            entry.name.as_str()
+        };
+        let mut v = self.add_stream(managed_id, &entry.url, Some(label))?;
+        v.source_entry_id = Some(entry.id);
+        v.origin_name = Some(entry.name);
+        v.origin_tvg_id = entry.tvg_id;
+        self.upsert_variant(&v)?;
+        Ok(ch.name)
     }
 
     pub fn add_from_source_entry(&self, entry_id: &str) -> Result<ManagedChannel, StoreError> {

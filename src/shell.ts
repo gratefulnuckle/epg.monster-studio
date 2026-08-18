@@ -210,6 +210,8 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
   let sources: Source[] = [];
   let activeId = "";
   let searching = false;
+  let hasManaged = false;
+  let lastChans: Channel[] = [];
 
   const paintTabs = () => {
     tabs.innerHTML = "";
@@ -268,16 +270,20 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
 
   const paintChannels = (chans: Channel[], isSearch: boolean) => {
     searching = isSearch;
-    channelsEl.innerHTML = "";
+    lastChans = chans;
+    const addCol = hasManaged ? "" : " no-add";
+    channelsEl.innerHTML = `<div class="chan-head${addCol}"><span>Play</span>${hasManaged ? "<span>Add</span>" : ""}<span>Name</span><span>tvg-id</span><span>URL</span></div>`;
     for (const c of chans) {
       const row = document.createElement("div");
-      row.className = "chan-row";
+      row.className = "chan-row" + addCol;
       row.innerHTML = `
-        <button class="play" data-url="${escapeAttr(c.url)}" data-sid="${escapeAttr(c.sourceId)}">Play</button>
+        <button class="play" data-url="${escapeAttr(c.url)}" data-sid="${escapeAttr(c.sourceId)}" title="Play stream">&#xE768;</button>
+        ${hasManaged ? `<button class="add-pl" data-id="${escapeAttr(c.id)}" title="Add to managed playlist">&#xE710;</button>` : ""}
         <div class="chan-meta">
           <div class="chan-name">${escapeHtml(c.name)}</div>
-          <div class="chan-sub">${escapeHtml(c.groupTitle)}${c.tvgId ? " · " : ""}<span class="copy" data-copy="${escapeAttr(c.tvgId ?? "")}">${escapeHtml(c.tvgId ?? "")}</span></div>
+          <div class="chan-sub">${escapeHtml(c.groupTitle)}</div>
         </div>
+        <span class="copy" data-copy="${escapeAttr(c.tvgId ?? "")}">${escapeHtml(c.tvgId ?? "")}</span>
         <span class="copy url" data-copy="${escapeAttr(c.url)}" title="${escapeAttr(c.url)}">${escapeHtml(truncate(c.url, 64))}</span>
       `;
       channelsEl.appendChild(row);
@@ -286,6 +292,7 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
 
   const reload = async () => {
     sources = await api.listSources();
+    hasManaged = (await api.managedCount()) > 0;
     const has = sources.length > 0;
     empty.style.display = has ? "none" : "block";
     workspace.style.display = has ? "grid" : "none";
@@ -346,15 +353,140 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
     }
   });
 
+  const choiceDlg = page.querySelector<HTMLElement>("#add-choice-dlg")!;
+  const backupDlg = page.querySelector<HTMLElement>("#add-backup-dlg")!;
+  let pendingAdd: Channel | null = null;
+  let backupTarget: string | null = null;
+
+  const openAddChoice = (ch: Channel) => {
+    if (!hasManaged) {
+      toast("Load a curated playlist in Playlist Editor first");
+      return;
+    }
+    pendingAdd = ch;
+    page.querySelector("#add-choice-text")!.textContent =
+      `Add “${ch.name}” as a new channel, or as a backup stream on an existing channel?`;
+    choiceDlg.classList.add("open");
+  };
+
+  const openBackupPicker = async (ch: Channel) => {
+    backupTarget = null;
+    page.querySelector("#add-backup-text")!.textContent =
+      `Pick the managed channel that should get “${ch.name}” as a hidden backup.`;
+    const tree = page.querySelector("#add-backup-tree")!;
+    tree.innerHTML = "";
+    const managed = await api.listManaged();
+    if (managed.length === 0) {
+      toast("No managed channels to attach a backup to");
+      return;
+    }
+    const groups = new Map<string, { id: string; name: string; groupTitle: string }[]>();
+    for (const m of managed) {
+      const g = m.groupTitle.trim() || "Ungrouped";
+      const list = groups.get(g) ?? [];
+      list.push(m);
+      groups.set(g, list);
+    }
+    const keys = [...groups.keys()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+    for (const key of keys) {
+      const wrap = document.createElement("details");
+      const sum = document.createElement("summary");
+      sum.textContent = key;
+      wrap.appendChild(sum);
+      const kids = (groups.get(key) ?? []).slice().sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+      for (const m of kids) {
+        const b = document.createElement("button");
+        b.className = "group-row";
+        b.textContent = m.name;
+        b.addEventListener("click", () => {
+          tree.querySelectorAll(".group-row").forEach((el) => el.classList.remove("active"));
+          b.classList.add("active");
+          backupTarget = m.id;
+        });
+        b.addEventListener("dblclick", () => {
+          backupTarget = m.id;
+          void attachBackup(ch, m.id);
+        });
+        wrap.appendChild(b);
+      }
+      tree.appendChild(wrap);
+    }
+    backupDlg.classList.add("open");
+  };
+
+  const attachBackup = async (ch: Channel, managedId: string) => {
+    try {
+      const name = await api.addBackupFromSource(managedId, ch.id);
+      backupDlg.classList.remove("open");
+      toast(`Backup added to ${name}`);
+    } catch (e) {
+      toast(String(e));
+    }
+  };
+
+  page.querySelector("#add-choice-cancel")!.addEventListener("click", () => choiceDlg.classList.remove("open"));
+  page.querySelector("#add-choice-new")!.addEventListener("click", () => {
+    if (!pendingAdd) return;
+    sessionStorage.setItem("studio-editor-draft", JSON.stringify(pendingAdd));
+    choiceDlg.classList.remove("open");
+    page.closest(".shell")?.querySelector<HTMLButtonElement>('[data-nav="editor"]')?.click();
+  });
+  page.querySelector("#add-choice-backup")!.addEventListener("click", () => {
+    const ch = pendingAdd;
+    choiceDlg.classList.remove("open");
+    if (ch) void openBackupPicker(ch);
+  });
+  page.querySelector("#add-backup-cancel")!.addEventListener("click", () => backupDlg.classList.remove("open"));
+  page.querySelector("#add-backup-ok")!.addEventListener("click", () => {
+    if (!pendingAdd || !backupTarget) {
+      toast("Select a channel (not just a group)");
+      return;
+    }
+    void attachBackup(pendingAdd, backupTarget);
+  });
+
+  page.querySelector("#src-refresh")!.addEventListener("click", async () => {
+    if (!activeId) {
+      toast("No source selected");
+      return;
+    }
+    try {
+      const src = await api.refreshSource(activeId);
+      toast(`Refreshed ${src.name} (${src.channelCount})`);
+      await reload();
+    } catch (e) {
+      toast(String(e));
+    }
+  });
+
+  void invoke<Record<string, unknown>>("load_settings").then((st) => {
+    const sel = page.querySelector<HTMLSelectElement>("#src-player");
+    if (sel) sel.value = String(st.DefaultPlayer ?? 0);
+  });
+  page.querySelector("#src-player")!.addEventListener("change", async () => {
+    const sel = page.querySelector<HTMLSelectElement>("#src-player")!;
+    try {
+      const st = await invoke<Record<string, unknown>>("load_settings");
+      st.DefaultPlayer = parseInt(sel.value, 10) || 0;
+      await invoke("save_settings", { settings: st });
+    } catch (e) {
+      toast(String(e));
+    }
+  });
+
   channelsEl.addEventListener("click", async (ev) => {
     const t = ev.target as HTMLElement;
     if (t.classList.contains("play")) {
       try {
         await api.playUrl(t.dataset.url ?? "", t.dataset.sid);
-        toast("Play");
+        toast("Playing");
       } catch (e) {
         toast(String(e));
       }
+    }
+    if (t.classList.contains("add-pl") && t.dataset.id) {
+      const found = lastChans.find((c) => c.id === t.dataset.id);
+      if (found) openAddChoice(found);
     }
     if (t.classList.contains("copy") && t.dataset.copy) {
       await navigator.clipboard.writeText(t.dataset.copy);
@@ -390,6 +522,11 @@ function pageHtml(id: NavId): string {
         <div class="source-bar">
           <button class="accent" id="add-file">Add source…</button>
           <button id="add-url-open">Add URL…</button>
+          <button id="src-refresh" title="Reload active source">Refresh</button>
+          <select id="src-player" title="Player for Play button">
+            <option value="0">mpv</option>
+            <option value="1">VLC</option>
+          </select>
         </div>
         <div class="empty" id="source-empty">
           <div class="glyph">☰</div>
@@ -411,6 +548,28 @@ function pageHtml(id: NavId): string {
             <div class="dialog-actions">
               <button id="url-cancel">Cancel</button>
               <button class="accent" id="url-ok">Load</button>
+            </div>
+          </div>
+        </div>
+        <div class="dialog-backdrop" id="add-choice-dlg">
+          <div class="dialog">
+            <h2>Add to managed playlist</h2>
+            <p id="add-choice-text"></p>
+            <div class="dialog-actions">
+              <button id="add-choice-cancel">Cancel</button>
+              <button id="add-choice-backup">Add Backup Source</button>
+              <button class="accent" id="add-choice-new">Add New Source</button>
+            </div>
+          </div>
+        </div>
+        <div class="dialog-backdrop" id="add-backup-dlg">
+          <div class="dialog" style="width:520px;max-height:80vh;overflow:auto">
+            <h2>Add backup source</h2>
+            <p class="page-sub" id="add-backup-text"></p>
+            <div id="add-backup-tree" class="backup-tree"></div>
+            <div class="dialog-actions">
+              <button id="add-backup-cancel">Cancel</button>
+              <button class="accent" id="add-backup-ok">Add</button>
             </div>
           </div>
         </div>`;

@@ -566,13 +566,50 @@ textarea {
   background: rgba(108, 92, 231, 0.22);
 }
 
+.chan-head,
 .chan-row {
   display: grid;
-  grid-template-columns: 56px 1fr minmax(120px, 32%);
-  gap: 10px;
+  grid-template-columns: 48px 40px 2fr 1fr 2fr;
+  gap: 8px;
   align-items: center;
   padding: 8px 10px;
+}
+
+.chan-head {
+  opacity: 0.7;
+  font-size: 12px;
+  border-bottom: 1px solid var(--studio-stroke);
+}
+
+.chan-row {
   border-bottom: 1px solid #1c1c24;
+}
+
+.chan-head.no-add,
+.chan-row.no-add {
+  grid-template-columns: 48px 2fr 1fr 2fr;
+}
+
+.chan-row .play,
+.chan-row .add-pl {
+  width: 36px;
+  height: 32px;
+  padding: 0;
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  font-size: 14px;
+}
+
+.backup-tree {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--studio-stroke);
+  border-radius: 8px;
+  padding: 6px;
+}
+
+.backup-tree summary {
+  cursor: pointer;
+  padding: 6px 8px;
 }
 
 .chan-name {
