@@ -182,10 +182,13 @@ fn fingerprint(err_type: &str, details: &str) -> String {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max])
+        return s.to_string();
     }
+    let mut end = max.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 #[cfg(test)]
@@ -227,5 +230,13 @@ mod tests {
         assert!(!payload["error"]["fingerprint"].as_str().unwrap().is_empty());
         assert!(!json.contains("epgm_secretTOKEN"));
         assert!(!json.contains("provider.example"));
+    }
+
+    #[test]
+    fn truncate_does_not_panic_on_utf8_boundary() {
+        let s = "é".repeat(5000);
+        let t = truncate(&s, 8000);
+        assert!(t.ends_with('…'));
+        assert!(t.is_char_boundary(t.len()));
     }
 }

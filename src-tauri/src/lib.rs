@@ -1076,12 +1076,13 @@ fn post_issue(
         notes.as_deref(),
         Some(&user),
     );
-    Ok(members::post_issue(
-        &settings.member_api_base,
-        &key,
-        &payload,
-        Some(VERSION),
-    ))
+    let base = settings.member_api_base.clone();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        members::post_issue(&base, &key, &payload, Some(VERSION))
+    })) {
+        Ok(r) => Ok(r),
+        Err(_) => Err("Send report failed (internal error).".into()),
+    }
 }
 
 #[tauri::command]

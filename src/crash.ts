@@ -12,8 +12,11 @@ export type CrashReport = {
   kind: string;
 };
 
+let sendingIssue = false;
+
 export function installCrashHooks(): void {
   window.addEventListener("error", (ev) => {
+    if (sendingIssue) return;
     void invoke("write_crash_report", {
       kind: "managed",
       title: "Unhandled UI exception",
@@ -22,6 +25,7 @@ export function installCrashHooks(): void {
     }).catch(() => undefined);
   });
   window.addEventListener("unhandledrejection", (ev) => {
+    if (sendingIssue) return;
     void invoke("write_crash_report", {
       kind: "managed",
       title: "Unhandled promise rejection",
@@ -89,19 +93,21 @@ export async function showPendingCrash(root: HTMLElement): Promise<void> {
 }
 
 export function presentCrash(root: HTMLElement, report: CrashReport): void {
+  const kind = (report.kind || "unknown").toUpperCase();
   const host = document.createElement("div");
   host.className = "dialog-backdrop open";
   host.innerHTML = `
     <div class="dialog" style="width:720px;max-height:85vh;overflow:auto">
       <h2>epg.monster studio — crash report</h2>
       <div class="chan-name">${esc(report.title)}</div>
-      <p class="page-sub">${esc(report.kind.toUpperCase())} · ${esc(report.when)}</p>
+      <p class="page-sub">${esc(kind)} · ${esc(report.when)}</p>
       <p>${esc(report.summary)}</p>
       <pre class="page-sub" style="white-space:pre-wrap;user-select:text;max-height:240px;overflow:auto;background:#0e0e14;padding:10px;border-radius:8px">${esc(report.details)}</pre>
       <div class="field"><label>Optional notes for epg.monster</label>
         <textarea id="crash-notes" placeholder="What were you doing when this happened?" rows="3"></textarea></div>
       <p class="page-sub">Crash report: ${esc(report.reportPath)}
 Log file: ${esc(report.logPath)}</p>
+      <p class="page-sub" id="crash-status"></p>
       <div class="dialog-actions">
         <button id="crash-send">Send report to epg.monster</button>
         <button id="crash-logs">Open logs folder</button>
@@ -111,33 +117,52 @@ Log file: ${esc(report.logPath)}</p>
       </div>
     </div>`;
   root.appendChild(host);
+  const status = host.querySelector<HTMLElement>("#crash-status")!;
+  const sendBtn = host.querySelector<HTMLButtonElement>("#crash-send")!;
   host.querySelector("#crash-close")!.addEventListener("click", () => host.remove());
   host.querySelector("#crash-logs")!.addEventListener("click", () => {
-    void invoke("open_folder", { path: report.logPath });
+    void invoke("open_folder", { path: report.logPath ?? "" });
   });
   host.querySelector("#crash-file")!.addEventListener("click", () => {
-    void invoke("open_folder", { path: report.reportPath });
+    void invoke("open_folder", { path: report.reportPath ?? "" });
   });
   host.querySelector("#crash-copy")!.addEventListener("click", () => {
-    void navigator.clipboard.writeText(report.details);
+    void navigator.clipboard.writeText(report.details ?? "");
   });
-  host.querySelector("#crash-send")!.addEventListener("click", async () => {
+  sendBtn.addEventListener("click", async () => {
     const notes = (host.querySelector("#crash-notes") as HTMLTextAreaElement).value;
+    sendBtn.disabled = true;
+    sendingIssue = true;
+    status.textContent = "Sending…";
     try {
       const r = await invoke<{ ok: boolean; message: string; githubUrl?: string | null }>("post_issue", {
         kind: "crash",
-        title: report.title,
-        summary: report.summary,
-        details: report.details,
+        title: report.title ?? "Crash",
+        summary: report.summary ?? "",
+        details: report.details ?? "",
         notes,
       });
-      alert(r.ok ? "Report sent to epg.monster\n" + r.message : "Could not send report\n" + r.message);
+      status.textContent = (r.ok ? "Report sent to epg.monster\n" : "Could not send report\n") + (r.message ?? "");
+      if (r.ok && r.githubUrl) {
+        const a = document.createElement("a");
+        a.href = r.githubUrl;
+        a.target = "_blank";
+        a.rel = "noreferrer";
+        a.textContent = "Open tracker";
+        status.appendChild(document.createElement("br"));
+        status.appendChild(a);
+      }
     } catch (e) {
-      alert(String(e));
+      status.textContent = "Could not send report\n" + String(e);
+    } finally {
+      sendingIssue = false;
+      sendBtn.disabled = false;
     }
   });
 }
 
-function esc(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+function esc(s: string | null | undefined): string {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c,
+  );
 }
