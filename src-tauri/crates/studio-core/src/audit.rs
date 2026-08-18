@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection};
@@ -13,6 +14,58 @@ use crate::models::{ManagedChannel, StreamVariant};
 use crate::paths::{audit_process_db_path, offline_slates_directory};
 use crate::settings::AppSettings;
 use crate::store::{SqliteStore, StoreError};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Interrupt {
+    None = 0,
+    Pause = 1,
+    Cancel = 2,
+}
+
+static INTERRUPT: AtomicU8 = AtomicU8::new(0);
+static PLAYER_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn request_interrupt(kind: Interrupt) {
+    INTERRUPT.store(kind as u8, Ordering::SeqCst);
+}
+
+pub fn clear_interrupt() {
+    INTERRUPT.store(Interrupt::None as u8, Ordering::SeqCst);
+}
+
+pub fn interrupt_kind() -> Interrupt {
+    match INTERRUPT.load(Ordering::SeqCst) {
+        1 => Interrupt::Pause,
+        2 => Interrupt::Cancel,
+        _ => Interrupt::None,
+    }
+}
+
+pub fn set_player_active(active: bool) {
+    PLAYER_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+pub fn player_is_active() -> bool {
+    PLAYER_ACTIVE.load(Ordering::SeqCst)
+}
+
+fn probe_cancelled(r: &AuditResult) -> bool {
+    r.error.as_deref() == Some("__cancelled__") || interrupt_kind() != Interrupt::None
+}
+
+fn apply_interrupt_to_job(job: &mut AuditJob, process: &ProcessStore) -> Result<(), StoreError> {
+    match interrupt_kind() {
+        Interrupt::Cancel => {
+            job.state = "cancelled".into();
+            job.finished_at = Some(now_iso());
+        }
+        _ => {
+            job.state = "paused".into();
+        }
+    }
+    process.update_job(job)
+}
 
 pub const HASH_SIZE: usize = 16;
 pub const HASH_BYTES: usize = HASH_SIZE * HASH_SIZE;
@@ -503,6 +556,17 @@ impl ProcessStore {
         Ok(())
     }
 
+    pub fn add_elapsed_ms(&self, ms: i64) -> Result<(), StoreError> {
+        let Some(mut job) = self.load_job()? else {
+            return Ok(());
+        };
+        if job.state != "running" {
+            return Ok(());
+        }
+        job.elapsed_ms = job.elapsed_ms.saturating_add(ms.max(0));
+        self.update_job(&job)
+    }
+
     pub fn mark_queue_done(&self, seq: i32) -> Result<(), StoreError> {
         self.conn
             .execute("UPDATE queue SET done=1 WHERE seq=?1", params![seq])?;
@@ -728,6 +792,11 @@ pub fn begin_job(
             })
             .then(a.priority.cmp(&b.priority))
     });
+    if variants.is_empty() {
+        return Err(StoreError::Io(std::io::Error::other(
+            "No managed stream variants — add channels in Playlist Editor",
+        )));
+    }
     let mut queue = Vec::new();
     for (n, v) in variants.iter().enumerate() {
         let ch = by_id.get(&v.managed_channel_id);
@@ -786,6 +855,14 @@ pub fn next_step(
     let mut job = process
         .load_job()?
         .ok_or_else(|| StoreError::Io(std::io::Error::other("No saved Stream Audit")))?;
+    if interrupt_kind() != Interrupt::None {
+        apply_interrupt_to_job(&mut job, process)?;
+        return Ok(AuditStep {
+            job,
+            feed: Vec::new(),
+            done: true,
+        });
+    }
     if job.state != "running" {
         return Err(StoreError::Io(std::io::Error::other(
             if job.has_remaining() {
@@ -857,6 +934,14 @@ pub fn next_step(
     };
     let ch = store.get_managed(&item.channel_id)?;
     let mut result = probe_url(&ffmpeg, &ffprobe, &variant.url, timeout);
+    if probe_cancelled(&result) {
+        apply_interrupt_to_job(&mut job, process)?;
+        return Ok(AuditStep {
+            job,
+            feed: Vec::new(),
+            done: true,
+        });
+    }
     result = apply_offline_slate(result, &ffmpeg, &variant.url, timeout);
     if settings.black_detect_enabled {
         result = apply_black_detect(result, &ffmpeg, &variant.url, timeout);
@@ -1029,6 +1114,19 @@ pub fn probe_url(ffmpeg: &str, ffprobe: &str, url: &str, timeout_ms: i32) -> Aud
         timeout,
     );
     let latency = start.elapsed().as_millis() as i32;
+    if killed && (stderr == "__cancelled__" || interrupt_kind() != Interrupt::None) {
+        return AuditResult {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            ok: false,
+            error: Some("__cancelled__".into()),
+            latency_ms: Some(latency),
+            engine: "ffmpeg".into(),
+            probed_at: now_iso(),
+            target_type: "variant".into(),
+            grade: "F".into(),
+            ..AuditResult::default()
+        };
+    }
     if killed {
         return finalize_grade(AuditResult {
             id: uuid::Uuid::new_v4().simple().to_string(),
@@ -1399,6 +1497,10 @@ fn run_tool(bin: &str, args: &[&str], timeout: Duration) -> (bool, String, bool)
                 return (status.success(), err, false);
             }
             Ok(None) => {
+                if interrupt_kind() != Interrupt::None {
+                    kill_tree(&mut child);
+                    return (false, "__cancelled__".into(), true);
+                }
                 if start.elapsed() >= timeout {
                     kill_tree(&mut child);
                     return (false, String::new(), true);
@@ -1432,6 +1534,10 @@ fn run_tool_stdout(bin: &str, args: &[&str], timeout: Duration) -> (bool, String
                 return (status.success(), out, false);
             }
             Ok(None) => {
+                if interrupt_kind() != Interrupt::None {
+                    kill_tree(&mut child);
+                    return (false, "__cancelled__".into(), true);
+                }
                 if start.elapsed() >= timeout {
                     kill_tree(&mut child);
                     return (false, String::new(), true);
@@ -1669,5 +1775,65 @@ mod tests {
     fn parse_fps_fraction() {
         assert_eq!(parse_fps("30000/1001"), Some(29.97));
         assert_eq!(parse_fps("0/0"), None);
+    }
+
+    #[test]
+    fn interrupt_kind_pause_and_cancel() {
+        clear_interrupt();
+        assert_eq!(interrupt_kind(), Interrupt::None);
+        request_interrupt(Interrupt::Pause);
+        assert_eq!(interrupt_kind(), Interrupt::Pause);
+        request_interrupt(Interrupt::Cancel);
+        assert_eq!(interrupt_kind(), Interrupt::Cancel);
+        clear_interrupt();
+        assert_eq!(interrupt_kind(), Interrupt::None);
+    }
+
+    #[test]
+    fn begin_job_rejects_empty_lineup() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        let process = ProcessStore::open(Some(&dir.path().join("a.db"))).unwrap();
+        let err = begin_job(&store, &process, &AppSettings::default(), true, true, None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("No managed stream variants"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn add_elapsed_ms_while_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let process = ProcessStore::open(Some(&dir.path().join("a.db"))).unwrap();
+        let job = AuditJob {
+            id: "e".into(),
+            state: "running".into(),
+            scope: "all".into(),
+            auto_swap: true,
+            total: 1,
+            current_index: 0,
+            ok_count: 0,
+            fail_count: 0,
+            started_at: now_iso(),
+            updated_at: now_iso(),
+            finished_at: None,
+            pid: 1,
+            grades_json: "{}".into(),
+            first_eta_seconds: 10,
+            elapsed_ms: 0,
+        };
+        process.replace_job(&job, &[]).unwrap();
+        process.add_elapsed_ms(1500).unwrap();
+        assert_eq!(process.load_job().unwrap().unwrap().elapsed_ms, 1500);
+        process
+            .update_job(&AuditJob {
+                state: "paused".into(),
+                elapsed_ms: 1500,
+                ..process.load_job().unwrap().unwrap()
+            })
+            .unwrap();
+        process.add_elapsed_ms(400).unwrap();
+        assert_eq!(process.load_job().unwrap().unwrap().elapsed_ms, 1500);
     }
 }

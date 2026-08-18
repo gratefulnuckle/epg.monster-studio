@@ -274,6 +274,7 @@ textarea {
 }
 
 .page {
+  position: relative;
   min-height: 0;
   overflow: auto;
   padding: 24px;
@@ -817,9 +818,7 @@ html.splash-open #app {
 }
 
 .logo-slot .tvg-check {
-  position: absolute;
-  right: 1px;
-  bottom: 0;
+  display: none;
 }
 
 .chan-pick {
@@ -845,7 +844,8 @@ html.splash-open #app {
 
 .tvg-check {
   color: #32cd32;
-  font-weight: 700;
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  font-weight: 400;
 }
 
 input.tvg-ok {
@@ -859,6 +859,38 @@ input.tvg-ok {
   max-height: 200px;
   overflow: auto;
   margin-top: 4px;
+}
+
+.suggest-item.active {
+  background: rgba(108, 92, 231, 0.22);
+}
+
+.src-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.src-pick input {
+  width: auto;
+}
+
+.group-rename-pop {
+  position: absolute;
+  z-index: 40;
+  min-width: 220px;
+  max-width: 340px;
+  padding: 12px;
+  background: #2a2a36;
+  border: 1px solid #5a5a6e;
+  border-radius: 8px;
+}
+
+.group-rename-title {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.85;
+  margin-bottom: 8px;
 }
 
 .suggest-item {

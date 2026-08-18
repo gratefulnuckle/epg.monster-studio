@@ -25,10 +25,16 @@ pub struct TunerRuntimeStatus {
     pub device_id: String,
     pub error: Option<String>,
     pub status_label: String,
+    pub advertised_epg: String,
 }
 
 impl TunerRuntimeStatus {
-    fn from_profile(p: &TunerServerProfile, host: Option<&TunerHost>, err: Option<String>) -> Self {
+    fn from_profile(
+        p: &TunerServerProfile,
+        host: Option<&TunerHost>,
+        err: Option<String>,
+        advertised_epg: String,
+    ) -> Self {
         let running = host.is_some();
         Self {
             kind: p.kind.clone(),
@@ -48,13 +54,30 @@ impl TunerRuntimeStatus {
             } else {
                 "Stopped".into()
             },
+            advertised_epg,
         }
     }
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TunerGraphRow {
+    pub kind: String,
+    pub live: u32,
+    pub max: u32,
+    pub discover: u32,
+    pub lineup: u32,
+    pub guide: u32,
+    pub m3u: u32,
+    pub stream: u32,
+    pub not_found: u32,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TunerLogLine {
+    pub at: String,
     pub kind: String,
     pub line: String,
 }
@@ -78,6 +101,7 @@ impl TunerManager {
 
     fn log(&mut self, kind: &str, line: &str) {
         self.logs.push(TunerLogLine {
+            at: studio_core::audit::now_iso(),
             kind: kind.into(),
             line: line.into(),
         });
@@ -88,6 +112,10 @@ impl TunerManager {
 
     pub fn logs(&self) -> &[TunerLogLine] {
         &self.logs
+    }
+
+    pub fn clear_logs(&mut self) {
+        self.logs.clear();
     }
 
     pub fn try_start(
@@ -179,12 +207,57 @@ impl TunerManager {
         Ok(())
     }
 
+    /// C# `TunerHostManager.Apply`: start enabled+running hosts, dispose the rest.
+    pub fn apply(
+        &mut self,
+        settings: &mut AppSettings,
+        snapshot: Arc<dyn Fn() -> TunerSnapshot + Send + Sync>,
+    ) {
+        settings.ensure_tuner_profiles();
+        let want: Vec<String> = ["Plex", "Jellyfin", "Emby", "Iptv"]
+            .into_iter()
+            .filter(|k| {
+                profile_ref(settings, k)
+                    .map(|p| p.enabled && p.running)
+                    .unwrap_or(false)
+            })
+            .map(|k| k.to_string())
+            .collect();
+        let stale: Vec<String> = self
+            .hosts
+            .keys()
+            .filter(|k| !want.iter().any(|w| w == *k))
+            .cloned()
+            .collect();
+        for k in stale {
+            if let Some(h) = self.hosts.remove(&k) {
+                h.stop();
+                self.log(&k, "Stopped (settings apply)");
+            }
+        }
+        for k in want {
+            if self.hosts.contains_key(&k) {
+                if let Ok(p) = profile_mut(settings, &k) {
+                    if let Some(h) = self.hosts.get(&k) {
+                        h.set_max(p.tuner_count);
+                    }
+                }
+                continue;
+            }
+            if let Err(e) = self.try_start(settings, &k, snapshot.clone()) {
+                self.log(&k, &e);
+            }
+        }
+        self.sync_discovery(settings);
+    }
+
     pub fn status(&self, settings: &AppSettings, kind: &str) -> Option<TunerRuntimeStatus> {
         let p = profile_ref(settings, kind)?;
         Some(TunerRuntimeStatus::from_profile(
             p,
             self.hosts.get(kind).map(|a| a.as_ref()),
             self.errors.get(kind).cloned(),
+            settings.tuner_advertised_epg(p),
         ))
     }
 
@@ -223,6 +296,29 @@ impl TunerManager {
         for line in self.discovery.take_logs() {
             self.log("", &line);
         }
+    }
+
+    pub fn graph_rows(&self, settings: &AppSettings) -> Vec<TunerGraphRow> {
+        ["Plex", "Jellyfin", "Emby", "Iptv"]
+            .into_iter()
+            .filter_map(|k| {
+                let p = profile_ref(settings, k)?;
+                let host = self.hosts.get(k);
+                let st = host.and_then(|h| h.stats.lock().ok());
+                Some(TunerGraphRow {
+                    kind: k.into(),
+                    live: host.map(|h| h.active()).unwrap_or(0),
+                    max: host.map(|h| h.max()).unwrap_or(p.tuner_count.max(1) as u32),
+                    discover: st.as_ref().map(|s| s.discover).unwrap_or(0),
+                    lineup: st.as_ref().map(|s| s.lineup).unwrap_or(0),
+                    guide: st.as_ref().map(|s| s.guide).unwrap_or(0),
+                    m3u: st.as_ref().map(|s| s.m3u).unwrap_or(0),
+                    stream: st.as_ref().map(|s| s.stream).unwrap_or(0),
+                    not_found: st.as_ref().map(|s| s.not_found).unwrap_or(0),
+                    bytes: st.as_ref().map(|s| s.bytes).unwrap_or(0),
+                })
+            })
+            .collect()
     }
 
     pub fn graphs(&self) -> Vec<String> {
@@ -281,7 +377,12 @@ pub fn self_test(statuses: &[TunerRuntimeStatus]) -> (Vec<probe::TunerProbeRepor
                 steps: Vec::new(),
             };
             r.steps.push(probe::TunerProbeStep {
-                client: s.kind.clone(),
+                client: match s.kind.as_str() {
+                    "Plex" => "Plex DVR".into(),
+                    "Jellyfin" => "Jellyfin Live TV".into(),
+                    "Emby" => "Emby Live TV".into(),
+                    _ => "TiviMate".into(),
+                },
                 name: "listen".into(),
                 ok: false,
                 detail: "Not running — Start this tuner first".into(),

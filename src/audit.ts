@@ -139,9 +139,9 @@ export function auditHtml(): string {
 export async function mountAudit(page: HTMLElement, toast: (s: string) => void): Promise<void> {
   let feed: AuditFeedRow[] = [];
   let job: AuditJob | null = null;
-  let running = false;
-  let stopFlag: "none" | "pause" | "cancel" = "none";
   let delayMs = 6000;
+  let timeoutMs = 15000;
+  let pollId = 0;
   type PickCh = { id: string; name: string; group: string };
   let pick: PickCh[] = [];
   let results: AuditResult[] = [];
@@ -149,16 +149,21 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
 
   const autoSwap = () => (page.querySelector("#au-swap") as HTMLInputElement).checked;
 
+  const running = () => job?.state === "running";
+  const remain = () =>
+    !!job && (job.state === "running" || job.state === "paused") && job.currentIndex < job.total;
+
   const buttons = () => {
-    const r = running;
-    const remain = !!job && (job.state === "running" || job.state === "paused") && job.currentIndex < job.total;
+    const r = running();
     (page.querySelector("#au-start") as HTMLButtonElement).disabled = r;
     (page.querySelector("#au-visible") as HTMLButtonElement).disabled = r;
     (page.querySelector("#au-specific") as HTMLButtonElement).disabled = r;
     (page.querySelector("#au-today") as HTMLButtonElement).disabled = r;
     (page.querySelector("#au-pause") as HTMLButtonElement).disabled = !r;
-    (page.querySelector("#au-resume") as HTMLButtonElement).disabled = r || !remain;
-    (page.querySelector("#au-cancel") as HTMLButtonElement).disabled = !r && !remain;
+    (page.querySelector("#au-resume") as HTMLButtonElement).disabled = r || !remain();
+    (page.querySelector("#au-cancel") as HTMLButtonElement).disabled = !r;
+    const n = (job?.okCount ?? 0) + (job?.failCount ?? 0);
+    page.querySelector("#au-results")!.textContent = n ? `# Results  (${n})` : "# Results";
   };
 
   const paintFeed = () => {
@@ -185,13 +190,32 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
     el.scrollTop = el.scrollHeight;
   };
 
+  const hms = (sec: number) => {
+    const s = Math.max(0, Math.floor(sec));
+    return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
+  };
+
   const clock = () => {
+    const el = page.querySelector("#au-clock");
+    if (!el) return;
     if (!job) {
-      page.querySelector("#au-clock")!.textContent = "";
+      el.textContent = "Idle";
       return;
     }
-    page.querySelector("#au-clock")!.textContent =
-      `${job.state} · ${job.currentIndex}/${job.total} · ${job.okCount} ok · ${job.failCount} fail`;
+    const elapsed = (job.elapsedMs || 0) / 1000;
+    const left =
+      job.total > 0
+        ? Math.max(0, job.firstEtaSeconds * ((job.total - job.currentIndex) / job.total))
+        : 0;
+    const head =
+      job.state === "running" && job.currentIndex === 0
+        ? `Starting · ${job.total} stream(s) · delay ${delayMs}ms · timeout ${timeoutMs}ms`
+        : job.state === "completed"
+          ? "Audit finished"
+          : job.state === "paused"
+            ? "Paused"
+            : job.state;
+    el.textContent = `${head}    elapsed  ${hms(elapsed)}    left  ${hms(left)}`;
   };
 
   const applySnap = (snap: AuditSnapshot) => {
@@ -202,49 +226,51 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
     buttons();
   };
 
-  const loop = async () => {
-    running = true;
-    stopFlag = "none";
-    buttons();
-    try {
-      while (running && stopFlag === "none") {
-        const step = await invoke<AuditStep>("audit_next");
-        job = step.job;
-        feed.push(...step.feed);
-        paintFeed();
-        clock();
-        if (step.done || job.state !== "running") break;
-        if (job.currentIndex < job.total && delayMs > 0 && stopFlag === "none") {
-          await new Promise((r) => setTimeout(r, delayMs));
-        }
-      }
-      const reason = stopFlag as "none" | "pause" | "cancel";
-      if (reason === "pause") {
-        job = (await invoke<AuditJob | null>("audit_set_state", { next: "paused" })) ?? job;
-        toast("Stream Audit paused");
-      } else if (reason === "cancel") {
-        job = (await invoke<AuditJob | null>("audit_set_state", { next: "cancelled" })) ?? job;
-        toast("Stream Audit cancelled");
-      } else if (job?.state === "completed") {
-        toast("Stream Audit finished.");
-      }
-    } catch (e) {
-      toast(String(e));
-    } finally {
-      running = false;
-      buttons();
-      clock();
+  const stopPoll = () => {
+    if (pollId) {
+      window.clearInterval(pollId);
+      pollId = 0;
     }
   };
 
+  const startPoll = () => {
+    if (pollId) return;
+    const tick = async () => {
+      if (!page.querySelector("#au-feed")) {
+        stopPoll();
+        return;
+      }
+      try {
+        const snap = await invoke<AuditSnapshot>("audit_snapshot");
+        const was = job?.state;
+        applySnap(snap);
+        if (snap.job?.state === "completed" && was === "running") {
+          toast(`Stream Audit complete — ${snap.job.okCount} OK, ${snap.job.failCount} fail`);
+        }
+        if (snap.job?.state === "paused" && was === "running") {
+          toast("Stream Audit paused");
+        }
+        if (snap.job?.state === "cancelled" && was === "running") {
+          toast("Stream Audit cancelled");
+        }
+        if (snap.job?.state !== "running") stopPoll();
+      } catch {
+        /* keep polling */
+      }
+    };
+    pollId = window.setInterval(() => void tick(), 400);
+    void tick();
+  };
+
   const start = async (visibleOnly: boolean, ids?: string[]) => {
-    if (running) {
+    if (running()) {
       toast("Stream Audit already running");
       return;
     }
     try {
-      const settings = await invoke<{ AuditDelayMs?: number }>("load_settings");
+      const settings = await invoke<{ AuditDelayMs?: number; AuditTimeoutMs?: number }>("load_settings");
       delayMs = settings.AuditDelayMs ?? 6000;
+      timeoutMs = settings.AuditTimeoutMs ?? 15000;
       job = await invoke<AuditJob>("audit_begin", {
         visibleOnly,
         autoSwap: autoSwap(),
@@ -253,7 +279,8 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
       feed = [];
       paintFeed();
       clock();
-      void loop();
+      buttons();
+      startPoll();
     } catch (e) {
       toast(String(e));
     }
@@ -262,15 +289,15 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
   page.querySelector("#au-start")!.addEventListener("click", () => void start(false));
   page.querySelector("#au-visible")!.addEventListener("click", () => void start(true));
   page.querySelector("#au-pause")!.addEventListener("click", () => {
-    stopFlag = "pause";
+    void invoke("audit_interrupt", { kind: "paused" }).catch((e) => toast(String(e)));
   });
   page.querySelector("#au-cancel")!.addEventListener("click", () => {
-    stopFlag = "cancel";
+    void invoke("audit_interrupt", { kind: "cancelled" }).catch((e) => toast(String(e)));
   });
   page.querySelector("#au-resume")!.addEventListener("click", async () => {
     try {
       job = await invoke<AuditJob>("audit_set_state", { next: "running" });
-      void loop();
+      startPoll();
     } catch (e) {
       toast(String(e));
     }
@@ -278,7 +305,7 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
   page.querySelector("#au-undo")!.addEventListener("click", async () => {
     try {
       const ok = await invoke<boolean>("audit_undo");
-      toast(ok ? "Undid last swap." : "Nothing to undo.");
+      toast(ok ? "Swap undone" : "Nothing to undo");
     } catch (e) {
       toast(String(e));
     }
@@ -431,7 +458,7 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
       ? `${job.okCount} ok · ${job.failCount} fail · ${job.currentIndex}/${job.total}`
       : "";
     page.querySelector("#au-res-time")!.textContent = job
-      ? `first estimate ${job.firstEtaSeconds}s`
+      ? `elapsed  ${hms((job.elapsedMs || 0) / 1000)}  ·  first estimate  ${hms(job.firstEtaSeconds)}`
       : "";
   };
 
@@ -458,26 +485,37 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
   try {
     const settings = await invoke<{
       AuditDelayMs?: number;
+      AuditTimeoutMs?: number;
       AutoSwapOnAuditFail?: boolean;
       WeeklyAuditAutoRun?: boolean;
       WeeklyAuditLastRun?: string;
     }>("load_settings");
     delayMs = settings.AuditDelayMs ?? 6000;
+    timeoutMs = settings.AuditTimeoutMs ?? 15000;
     const swap = page.querySelector("#au-swap") as HTMLInputElement | null;
     if (!swap) return;
     swap.checked = settings.AutoSwapOnAuditFail !== false;
     const snap = await invoke<AuditSnapshot>("audit_snapshot");
     if (!page.querySelector("#au-swap")) return;
     applySnap(snap);
-    if (snap.interruptedOnLaunch || (snap.job && (snap.job.state === "paused" || snap.job.state === "running") && (snap.job.currentIndex ?? 0) < (snap.job.total ?? 0))) {
+    if (snap.job?.state === "running") {
+      startPoll();
+    } else if (
+      snap.interruptedOnLaunch ||
+      (snap.job &&
+        snap.job.state === "paused" &&
+        (snap.job.currentIndex ?? 0) < (snap.job.total ?? 0))
+    ) {
       page.querySelector("#au-resume-msg")!.textContent =
-        `A Stream Audit was left at ${snap.job?.currentIndex ?? 0}/${snap.job?.total ?? 0}. Resume, start new, or wait.`;
+        `A Stream Audit did not finish (${snap.job?.currentIndex ?? 0} of ${snap.job?.total ?? 0} probed, ${snap.job?.okCount ?? 0} OK / ${snap.job?.failCount ?? 0} fail). Resume from where it stopped, or start a new run?`;
       page.querySelector("#au-resume-dlg")!.classList.add("open");
     }
     if (settings.WeeklyAuditAutoRun) {
       const [day, groups] = await invoke<[string, string[], string[]]>("audit_today_groups");
       const last = settings.WeeklyAuditLastRun ?? "";
-      if (groups.length && last.trim() !== new Date().toISOString().slice(0, 10)) {
+      const now = new Date();
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      if (groups.length && last.trim() !== today) {
         toast(`${day} groups ready (${groups.join(", ")}). Click Run today's groups when you want to probe.`);
       }
     }

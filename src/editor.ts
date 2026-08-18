@@ -93,7 +93,7 @@ export function editorHtml(): string {
             <label>tvg-id (type for EPG suggestions)</label>
             <div class="tvg-row">
               <input id="ed-tvg" placeholder="Start typing a channel id or name…" />
-              <span id="ed-tvg-check" class="tvg-check" hidden>✓</span>
+              <span id="ed-tvg-check" class="tvg-check" title="tvg-id matches the EPG catalog" hidden>&#xE73E;</span>
             </div>
             <div id="ed-suggest" class="suggest" hidden></div>
           </div>
@@ -123,14 +123,34 @@ export function editorHtml(): string {
       </section>
     </div>
     <div class="dialog-backdrop" id="ed-src-dlg">
-      <div class="dialog" style="width:640px;max-height:80vh;overflow:auto">
-        <h2>Add channels from sources…</h2>
-        <input id="ed-src-filter" placeholder="Filter by name / tvg-id" />
-        <div id="ed-src-list" class="editor-list" style="max-height:360px"></div>
+      <div class="dialog" style="width:480px;max-height:80vh;overflow:auto">
+        <h2>Add missing channels from source</h2>
+        <p class="page-sub">Only adds channels not already in your managed list. Stream backups must be added manually on each channel.</p>
+        <div class="field"><label>Source</label><select id="ed-src-source"></select></div>
+        <div class="field"><label>Group</label><select id="ed-src-group"></select></div>
+        <div class="field"><label>Filter channels</label><input id="ed-src-filter" placeholder="name contains…" /></div>
+        <div id="ed-src-list" class="editor-list" style="max-height:240px"></div>
         <div class="dialog-actions">
-          <button id="ed-src-close">Close</button>
+          <button id="ed-src-close">Cancel</button>
+          <button class="accent" id="ed-src-add">Add selected</button>
         </div>
       </div>
+    </div>
+    <div class="dialog-backdrop" id="ed-load-dlg">
+      <div class="dialog">
+        <h2>Load curated playlist</h2>
+        <p class="page-sub" id="ed-load-body"></p>
+        <div class="dialog-actions">
+          <button id="ed-load-cancel">Cancel</button>
+          <button id="ed-load-merge">Merge</button>
+          <button class="accent" id="ed-load-replace">Replace</button>
+        </div>
+      </div>
+    </div>
+    <div class="group-rename-pop" id="ed-rename" hidden>
+      <div class="group-rename-title">Rename group</div>
+      <input id="ed-rename-box" />
+      <p class="page-sub">Enter to save · Esc or click away to cancel</p>
     </div>
   `;
 }
@@ -145,13 +165,82 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
   }
 
   let group = "";
+  let filter = "";
+  let allManaged: Managed[] = [];
   let selected: Managed | null = null;
   let draft = false;
   let chanVirt: VirtualList<Managed> | null = null;
   let groupVirt: VirtualList<{ title: string; count: number }> | null = null;
 
+  const filtered = () => allManaged.filter((c) => matchesEditorSearch(c, filter));
+
+  const renamePop = page.querySelector<HTMLElement>("#ed-rename")!;
+  const renameBox = page.querySelector<HTMLInputElement>("#ed-rename-box")!;
+  let renameOld = "";
+  const closeRename = () => {
+    renamePop.hidden = true;
+  };
+  const openRename = (title: string, ev: MouseEvent) => {
+    renameOld = title;
+    renameBox.value = title;
+    renamePop.hidden = false;
+    const x = Math.max(8, Math.min(ev.clientX - page.getBoundingClientRect().left, page.clientWidth - 240));
+    const y = Math.max(8, Math.min(ev.clientY - page.getBoundingClientRect().top, page.clientHeight - 120));
+    renamePop.style.left = `${x}px`;
+    renamePop.style.top = `${y}px`;
+    window.setTimeout(() => {
+      renameBox.focus();
+      renameBox.select();
+    }, 0);
+  };
+  const commitRename = async () => {
+    const newName = renameBox.value.trim() || "Ungrouped";
+    closeRename();
+    if (newName === renameOld) return;
+    try {
+      const updated = await invoke<number>("rename_managed_group", {
+        oldName: renameOld,
+        newName,
+      });
+      group = newName;
+      if (selected && sameGroup(selected.groupTitle, renameOld)) {
+        selected.groupTitle = newName;
+        (page.querySelector("#ed-group") as HTMLInputElement).value = newName;
+      }
+      toast(
+        updated > 0
+          ? `Renamed group to “${newName}” (${updated} channel${updated === 1 ? "" : "s"})`
+          : `Group rename: no channels matched “${renameOld}”`,
+      );
+      await reload();
+    } catch (e) {
+      toast(String(e));
+    }
+  };
+  renameBox.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      void commitRename();
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      closeRename();
+    }
+  });
+  page.addEventListener("mousedown", (ev) => {
+    if (renamePop.hidden) return;
+    if (!renamePop.contains(ev.target as Node)) closeRename();
+  });
+
   const reload = async () => {
-    const groups = await invoke<{ title: string; count: number }[]>("list_managed_groups");
+    allManaged = await invoke<Managed[]>("list_managed", { group: null });
+    const hits = filtered();
+    const counts = new Map<string, number>();
+    for (const c of hits) {
+      counts.set(c.groupTitle, (counts.get(c.groupTitle) ?? 0) + 1);
+    }
+    const groups = [...counts.entries()]
+      .map(([title, count]) => ({ title, count }))
+      .sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
     const gEl = page.querySelector<HTMLElement>("#ed-groups");
     const dl = page.querySelector("#ed-group-list");
     if (!gEl || !dl) return;
@@ -163,6 +252,10 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       opt.value = g.title;
       dl.appendChild(opt);
     }
+    if (groups.length && !groups.some((g) => sameGroup(g.title, group))) {
+      group = groups[0].title;
+    }
+    if (!groups.length) group = "";
     groupVirt?.destroy();
     gEl.innerHTML = "";
     groupVirt = bindVirtualList({
@@ -179,9 +272,7 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
         });
         b.addEventListener("contextmenu", (ev) => {
           ev.preventDefault();
-          const name = window.prompt("Rename group", g.title);
-          if (name == null) return;
-          void invoke("rename_managed_group", { oldName: g.title, newName: name }).then(reload);
+          openRename(g.title, ev);
         });
         b.addEventListener("dblclick", () => b.dispatchEvent(new Event("contextmenu")));
         return b;
@@ -203,7 +294,9 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       list.innerHTML = "";
       return;
     }
-    const chans = await invoke<Managed[]>("list_managed", { group });
+    const chans = group
+      ? filtered().filter((c) => sameGroup(c.groupTitle, group))
+      : [];
     if (!page.querySelector("#ed-channels")) return;
     if (!chanVirt) {
       chanVirt = bindVirtualList({
@@ -215,18 +308,20 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
           row.innerHTML = `
         <span class="logo-slot">
           ${c.tvgLogo ? `<img src="${esc(c.tvgLogo)}" alt="" />` : `<span class="logo-broken">&#xE7BA;</span>`}
-          ${c.hasEpgMatch ? `<span class="tvg-check">✓</span>` : ""}
         </span>
         <span>
           <span class="chan-name">${esc(c.name)}</span>
-          <span class="chan-sub">${esc(c.tvgId ?? "")}</span>
+          <span class="chan-sub">${esc(c.tvgId ?? "")}${
+            c.hasEpgMatch
+              ? ` <span class="tvg-check" title="tvg-id matches EPG catalog">&#xE73E;</span>`
+              : ""
+          }</span>
         </span>`;
           const img = row.querySelector("img");
           img?.addEventListener("error", () => {
             const slot = row.querySelector(".logo-slot");
             if (!slot) return;
-            const check = slot.querySelector(".tvg-check")?.outerHTML ?? "";
-            slot.innerHTML = `<span class="logo-broken">&#xE7BA;</span>${check}`;
+            slot.innerHTML = `<span class="logo-broken">&#xE7BA;</span>`;
           });
           row.addEventListener("click", () => void select(c.id));
           return row;
@@ -283,14 +378,17 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       tvgId: tvg,
       shiftHours: hours,
     });
+    const shiftNote = Math.abs(hours) > 0.01 ? `  ·  tvg-shift ${hours > 0 ? "+" : ""}${hours}` : "";
     if (!np) {
       now.hidden = false;
       page.querySelector("#ed-now-title")!.textContent = "No programme at this time";
-      page.querySelector("#ed-now-times")!.textContent = "";
+      page.querySelector("#ed-now-times")!.textContent = shiftNote
+        ? `Nothing scheduled at the shifted guide time.${shiftNote}`
+        : "Guide has this tvg-id, but nothing is scheduled at the current (shifted) time.";
     } else {
       now.hidden = false;
       page.querySelector("#ed-now-title")!.textContent = np.title;
-      page.querySelector("#ed-now-times")!.textContent = `${np.startLocal} – ${np.stopLocal}`;
+      page.querySelector("#ed-now-times")!.textContent = `${np.startLocal}–${np.stopLocal}${shiftNote}`;
     }
   };
 
@@ -337,7 +435,8 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     return {
       ...selected,
       name: (page.querySelector("#ed-name") as HTMLInputElement).value,
-      groupTitle: (page.querySelector("#ed-group") as HTMLInputElement).value || "Unassigned",
+      groupTitle:
+        (page.querySelector("#ed-group") as HTMLInputElement).value.trim() || "Ungrouped",
       tvgId: (page.querySelector("#ed-tvg") as HTMLInputElement).value.trim() || null,
       tvgLogo: (page.querySelector("#ed-logo") as HTMLInputElement).value.trim() || null,
       notes: (page.querySelector("#ed-notes") as HTMLTextAreaElement).value || null,
@@ -350,11 +449,8 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     if (!ch) return;
     try {
       const primary = (page.querySelector("#ed-primary") as HTMLInputElement).value.trim();
-      await invoke("save_managed", { channel: ch });
-      if (draft && primary) {
-        await invoke("add_stream", { managedId: ch.id, url: primary, label: "primary" });
-        draft = false;
-      }
+      await invoke("save_managed", { channel: ch, primaryUrl: primary || null });
+      draft = false;
       toast("Channel saved");
       selected = await invoke("get_managed", { id: ch.id });
       group = selected?.groupTitle ?? group;
@@ -384,16 +480,42 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     }
   });
   page.querySelector("#ed-refresh")!.addEventListener("click", () => void reload());
+  const runImport = async (replace: boolean) => {
+    const msg = await invoke<string>("import_curated", { replace });
+    if (msg === "cancelled") return;
+    toast(msg);
+    group = "";
+    selected = null;
+    await reload();
+  };
   page.querySelector("#ed-load")!.addEventListener("click", async () => {
     try {
-      const msg = await invoke<string>("import_curated", { replace: true });
-      if (msg !== "cancelled") toast(msg);
-      group = "";
-      selected = null;
-      await reload();
+      const n = await api.managedCount();
+      if (n <= 0) {
+        await runImport(true);
+        return;
+      }
+      const dlg = page.querySelector("#ed-load-dlg")!;
+      page.querySelector("#ed-load-body")!.innerHTML =
+        `You already have ${n} managed channel(s).<br><br>` +
+        "• Replace — clear the managed list and load this file as the new base<br>" +
+        "• Merge — keep existing; add only channels that are not already present<br><br>" +
+        "Stream backups are never auto-added — use “Add stream backup” on each channel.";
+      dlg.classList.add("open");
     } catch (e) {
       toast(String(e));
     }
+  });
+  page.querySelector("#ed-load-cancel")!.addEventListener("click", () => {
+    page.querySelector("#ed-load-dlg")!.classList.remove("open");
+  });
+  page.querySelector("#ed-load-replace")!.addEventListener("click", () => {
+    page.querySelector("#ed-load-dlg")!.classList.remove("open");
+    void runImport(true).catch((e) => toast(String(e)));
+  });
+  page.querySelector("#ed-load-merge")!.addEventListener("click", () => {
+    page.querySelector("#ed-load-dlg")!.classList.remove("open");
+    void runImport(false).catch((e) => toast(String(e)));
   });
   page.querySelector("#ed-export")!.addEventListener("click", async () => {
     try {
@@ -420,33 +542,60 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
 
   const tvg = page.querySelector<HTMLInputElement>("#ed-tvg")!;
   const sug = page.querySelector<HTMLElement>("#ed-suggest")!;
-  let t = 0;
+  let suggestHits: { tvgId: string; name: string; line: string }[] = [];
+  let suggestHi = 0;
+  const applySuggestion = (h: { tvgId: string; name: string }) => {
+    tvg.value = h.tvgId;
+    sug.hidden = true;
+    suggestHits = [];
+    const name = page.querySelector<HTMLInputElement>("#ed-name")!;
+    if (!name.value.trim()) name.value = h.name;
+    void updateMatch();
+  };
+  const paintSuggest = () => {
+    sug.innerHTML = "";
+    suggestHits.forEach((h, i) => {
+      const b = document.createElement("button");
+      b.className = "suggest-item" + (i === suggestHi ? " active" : "");
+      b.textContent = h.line;
+      b.addEventListener("mousedown", (ev) => {
+        ev.preventDefault();
+        applySuggestion(h);
+      });
+      sug.appendChild(b);
+    });
+    sug.hidden = suggestHits.length === 0;
+  };
   tvg.addEventListener("input", () => {
-    window.clearTimeout(t);
-    t = window.setTimeout(async () => {
+    void (async () => {
       await updateMatch();
       const q = tvg.value.trim();
       if (!q) {
+        suggestHits = [];
         sug.hidden = true;
         return;
       }
-      const hits = await invoke<{ tvgId: string; name: string; line: string }[]>("suggest_tvg", { query: q });
-      sug.innerHTML = "";
-      for (const h of hits) {
-        const b = document.createElement("button");
-        b.className = "suggest-item";
-        b.textContent = h.line;
-        b.addEventListener("click", () => {
-          tvg.value = h.tvgId;
-          sug.hidden = true;
-          const name = page.querySelector<HTMLInputElement>("#ed-name")!;
-          if (!name.value) name.value = h.name;
-          void updateMatch();
-        });
-        sug.appendChild(b);
-      }
-      sug.hidden = hits.length === 0;
-    }, 120);
+      suggestHits = await invoke("suggest_tvg", { query: q });
+      suggestHi = 0;
+      paintSuggest();
+    })();
+  });
+  tvg.addEventListener("keydown", (ev) => {
+    if (sug.hidden || suggestHits.length === 0) return;
+    if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      suggestHi = (suggestHi + 1) % suggestHits.length;
+      paintSuggest();
+    } else if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      suggestHi = (suggestHi - 1 + suggestHits.length) % suggestHits.length;
+      paintSuggest();
+    } else if (ev.key === "Enter") {
+      ev.preventDefault();
+      applySuggestion(suggestHits[suggestHi] ?? suggestHits[0]);
+    } else if (ev.key === "Escape") {
+      sug.hidden = true;
+    }
   });
 
   page.querySelector("#ed-add-stream")!.addEventListener("click", async () => {
@@ -498,39 +647,103 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     }
   });
 
-  page.querySelector("#ed-add-from")!.addEventListener("click", () => {
-    page.querySelector("#ed-src-dlg")!.classList.add("open");
-    void fillFromSources("");
-  });
-  page.querySelector("#ed-src-close")!.addEventListener("click", () => {
-    page.querySelector("#ed-src-dlg")!.classList.remove("open");
-  });
-  page.querySelector("#ed-src-filter")!.addEventListener("input", (ev) => {
-    void fillFromSources((ev.target as HTMLInputElement).value);
-  });
+  const srcDlg = page.querySelector("#ed-src-dlg")!;
+  const srcSource = page.querySelector<HTMLSelectElement>("#ed-src-source")!;
+  const srcGroup = page.querySelector<HTMLSelectElement>("#ed-src-group")!;
+  const srcFilter = page.querySelector<HTMLInputElement>("#ed-src-filter")!;
+  const srcList = page.querySelector<HTMLElement>("#ed-src-list")!;
 
-  async function fillFromSources(q: string) {
-    const list = page.querySelector("#ed-src-list")!;
-    list.innerHTML = "";
-    const hits = q.trim().length >= 2 ? await api.searchSources(q) : [];
-    for (const c of hits) {
-      const row = document.createElement("button");
-      row.className = "group-row";
-      row.textContent = `${c.name}  ·  ${c.tvgId ?? ""}`;
-      row.addEventListener("click", async () => {
-        try {
-          const ch = await invoke<Managed>("add_from_source", { entryId: c.id });
-          toast(`Added ${ch.name} to Unassigned.`);
-          group = ch.groupTitle;
-          await reload();
-          await select(ch.id);
-        } catch (e) {
-          toast(String(e));
-        }
-      });
-      list.appendChild(row);
+  const fillSourceGroups = async () => {
+    srcGroup.innerHTML = "";
+    const first = document.createElement("option");
+    first.value = "*";
+    first.textContent = "(first group)";
+    srcGroup.appendChild(first);
+    const sid = srcSource.value;
+    if (!sid) return;
+    const groups = await api.listGroups(sid);
+    for (const g of groups) {
+      const o = document.createElement("option");
+      o.value = g.title;
+      o.textContent = g.title;
+      srcGroup.appendChild(o);
+    }
+    srcGroup.selectedIndex = 0;
+    await fillFromSources();
+  };
+
+  async function fillFromSources() {
+    srcList.innerHTML = "";
+    const sid = srcSource.value;
+    if (!sid) return;
+    const groups = await api.listGroups(sid);
+    const tag = srcGroup.value;
+    const title = tag && tag !== "*" ? tag : groups[0]?.title;
+    if (!title) return;
+    let entries = await api.listChannels(sid, title);
+    if (!tag || tag === "*") entries = entries.slice(0, 300);
+    const q2 = srcFilter.value.trim().toLowerCase();
+    if (q2) {
+      entries = entries.filter(
+        (c) =>
+          c.name.toLowerCase().includes(q2) || (c.tvgId?.toLowerCase().includes(q2) ?? false),
+      );
+    }
+    for (const c of entries) {
+      const row = document.createElement("label");
+      row.className = "group-row src-pick";
+      row.innerHTML = `<input type="checkbox" data-id="${esc(c.id)}" /> ${esc(c.name)}  [${esc(c.tvgId ?? "")}]`;
+      srcList.appendChild(row);
     }
   }
+
+  page.querySelector("#ed-add-from")!.addEventListener("click", async () => {
+    try {
+      const sources = await api.listSources();
+      if (sources.length === 0) {
+        toast("Load a source in Add Sources first");
+        return;
+      }
+      srcSource.innerHTML = "";
+      for (const s of sources) {
+        const o = document.createElement("option");
+        o.value = s.id;
+        o.textContent = `${s.name} (${s.channelCount})`;
+        srcSource.appendChild(o);
+      }
+      srcSource.selectedIndex = 0;
+      srcFilter.value = "";
+      srcDlg.classList.add("open");
+      await fillSourceGroups();
+    } catch (e) {
+      toast(String(e));
+    }
+  });
+  page.querySelector("#ed-src-close")!.addEventListener("click", () => {
+    srcDlg.classList.remove("open");
+  });
+  srcSource.addEventListener("change", () => void fillSourceGroups());
+  srcGroup.addEventListener("change", () => void fillFromSources());
+  srcFilter.addEventListener("input", () => void fillFromSources());
+  page.querySelector("#ed-src-add")!.addEventListener("click", async () => {
+    const ids = [...srcList.querySelectorAll<HTMLInputElement>("input:checked")].map((el) => el.dataset.id!);
+    if (ids.length === 0) {
+      toast("Pick at least one group or channel");
+      return;
+    }
+    const label = srcSource.selectedOptions[0]?.textContent ?? "source";
+    try {
+      const msg = await invoke<string>("add_missing_from_source", {
+        entryIds: ids,
+        sourceLabel: label,
+      });
+      srcDlg.classList.remove("open");
+      toast(msg);
+      await reload();
+    } catch (e) {
+      toast(String(e));
+    }
+  });
 
   const beginDraft = (entry: { id: string; name: string; groupTitle: string; tvgId?: string | null; tvgLogo?: string | null; url: string }) => {
     draft = true;
@@ -563,6 +776,11 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     (page.querySelector("#ed-group") as HTMLInputElement).focus();
   };
 
+  page.addEventListener("studio-search", (ev) => {
+    filter = (ev as CustomEvent<string>).detail ?? "";
+    void reload().catch((e) => toast(String(e)));
+  });
+
   try {
     await reload();
     const raw = sessionStorage.getItem("studio-editor-draft");
@@ -577,4 +795,18 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
+export function matchesEditorSearch(c: Managed, q: string): boolean {
+  const f = q.trim().toLowerCase();
+  if (!f) return true;
+  return (
+    c.name.toLowerCase().includes(f) ||
+    c.groupTitle.toLowerCase().includes(f) ||
+    (c.tvgId?.toLowerCase().includes(f) ?? false)
+  );
+}
+
+function sameGroup(a: string, b: string): boolean {
+  return a.localeCompare(b, undefined, { sensitivity: "base" }) === 0;
 }

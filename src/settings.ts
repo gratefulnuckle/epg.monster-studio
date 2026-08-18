@@ -90,14 +90,14 @@ export function settingsHtml(): string {
         <p class="hint">External player used from Playlist Editor and Stream.</p>
         <div class="field"><label>Default player</label>
           <select id="set-player"><option value="0">mpv</option><option value="1">VLC</option></select></div>
-        <div class="field"><label>mpv.exe path</label><input id="set-mpv" /></div>
-        <div class="field"><label>vlc.exe path</label><input id="set-vlc" /></div>
+        <div class="field"><label id="lbl-mpv">mpv.exe path</label><input id="set-mpv" /></div>
+        <div class="field"><label id="lbl-vlc">vlc.exe path</label><input id="set-vlc" /></div>
       </section>
       <section class="tile">
         <h2>Stream Audit</h2>
         <p class="hint">ffmpeg / ffprobe used for probes and the HDHomeRun remux.</p>
-        <div class="field"><label>ffmpeg.exe path</label><input id="set-ffmpeg" /></div>
-        <div class="field"><label>ffprobe.exe path</label><input id="set-ffprobe" /></div>
+        <div class="field"><label id="lbl-ffmpeg">ffmpeg.exe path</label><input id="set-ffmpeg" /></div>
+        <div class="field"><label id="lbl-ffprobe">ffprobe.exe path</label><input id="set-ffprobe" /></div>
         <div class="field"><label>Delay between probes (ms)</label><input id="set-delay" type="number" /></div>
         <div class="field"><label>Probe timeout (ms)</label><input id="set-timeout" type="number" /></div>
         <label class="check"><input type="checkbox" id="set-autoswap" /> Auto-swap visible stream to working backup on fail</label>
@@ -184,8 +184,10 @@ export function settingsHtml(): string {
         <div>
           <button id="set-logs">Open logs folder</button>
           <button id="set-crashes">Open crash reports</button>
+          <button id="set-update">Update epg.monster studio</button>
         </div>
         <p class="page-sub" id="set-logpath"></p>
+        <p class="page-sub" id="set-update-status"></p>
         <label class="check"><input type="checkbox" id="set-updates" /> Check for app updates</label>
         <div class="field"><label>Optional Python path</label><input id="set-py" placeholder="python.exe" /></div>
       </section>
@@ -400,7 +402,7 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
       UseLocalLogos: chk("set-locallogos"),
       RemuxEngine: (page.querySelector("#set-reng") as HTMLSelectElement).value,
       RemuxProfile: (page.querySelector("#set-rprof") as HTMLSelectElement).value,
-      RemuxBufferKb: parseInt(val("set-rbuf"), 10) || 4096,
+      RemuxBufferKb: parseInt(val("set-rbuf"), 10) || 2048,
     };
   };
 
@@ -434,7 +436,7 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
     (page.querySelector("#set-reng") as HTMLSelectElement).value = st.RemuxEngine === "vlc" ? "vlc" : "ffmpeg";
     (page.querySelector("#set-rprof") as HTMLSelectElement).value =
       st.RemuxProfile === "copy_aac" ? "copy_aac" : "mpeg2_ac3";
-    setVal("set-rbuf", String(st.RemuxBufferKb || 4096));
+    setVal("set-rbuf", String(st.RemuxBufferKb || 2048));
     const week = parseWeek(st.WeeklyAuditJson ?? "");
     setVal("set-mon", week.Monday.join(", "));
     setVal("set-tue", week.Tuesday.join(", "));
@@ -558,6 +560,62 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
   page.querySelector("#set-slate-open")!.addEventListener("click", () => void invoke("open_folder", { path: folders.slates }));
   page.querySelector("#set-logs")!.addEventListener("click", () => void invoke("open_folder", { path: folders.logs }));
   page.querySelector("#set-crashes")!.addEventListener("click", () => void invoke("open_folder", { path: folders.crashes }));
+  page.querySelector("#set-update")!.addEventListener("click", async () => {
+    const status = $("set-update-status");
+    status.textContent = "Checking GitHub for updates…";
+    $("set-status").textContent = "Checking GitHub for updates…";
+    try {
+      const r = await invoke<{
+        current: string;
+        displayVersion: string;
+        latest?: string | null;
+        updateAvailable: boolean;
+        releaseUrl: string;
+        notes?: string | null;
+        error?: string | null;
+      }>("check_studio_update");
+      if (r.error) {
+        status.textContent = r.error;
+        $("set-status").textContent = r.error;
+        toast(r.error);
+        return;
+      }
+      if (!r.updateAvailable) {
+        const latest = r.latest || r.current;
+        const msg = `Already current (${r.displayVersion}). Latest on GitHub: ${latest}.`;
+        status.textContent = msg;
+        $("set-status").textContent = msg;
+        toast("Already current");
+        return;
+      }
+      const msg = `Update ${r.latest} is available. Opening the GitHub release…`;
+      status.textContent = msg;
+      $("set-status").textContent = msg;
+      await invoke("open_latest_release");
+      toast(`Update ${r.latest} — GitHub release opened`);
+    } catch (e) {
+      const msg = String(e);
+      status.textContent = msg;
+      $("set-status").textContent = msg;
+      toast(msg);
+    }
+  });
+
+  try {
+    const host = await invoke<{ os: string; exeSuffix: string }>("host_info");
+    const win = host.os === "windows";
+    $("lbl-mpv").textContent = win ? "mpv.exe path" : "mpv path";
+    $("lbl-vlc").textContent = win ? "vlc.exe path" : "vlc path";
+    $("lbl-ffmpeg").textContent = win ? "ffmpeg.exe path" : "ffmpeg path";
+    $("lbl-ffprobe").textContent = win ? "ffprobe.exe path" : "ffprobe path";
+    ($("set-mpv") as HTMLInputElement).placeholder = win ? "mpv.exe" : "mpv";
+    ($("set-vlc") as HTMLInputElement).placeholder = win ? "vlc.exe" : "vlc";
+    ($("set-ffmpeg") as HTMLInputElement).placeholder = win ? "ffmpeg.exe" : "ffmpeg";
+    ($("set-ffprobe") as HTMLInputElement).placeholder = win ? "ffprobe.exe" : "ffprobe";
+    ($("set-py") as HTMLInputElement).placeholder = win ? "python.exe" : "python3";
+  } catch {
+    /* labels stay Windows-shaped */
+  }
 
   try {
     folders = await invoke("settings_folders");

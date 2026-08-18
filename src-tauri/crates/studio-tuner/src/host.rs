@@ -82,6 +82,7 @@ pub struct TunerHost {
     pub last_error: Mutex<Option<String>>,
     pub stats: Mutex<TunerStats>,
     pub prefix: Mutex<String>,
+    listen_addr: Mutex<Option<std::net::SocketAddr>>,
 }
 
 impl TunerHost {
@@ -99,6 +100,7 @@ impl TunerHost {
             last_error: Mutex::new(None),
             stats: Mutex::new(TunerStats::default()),
             prefix: Mutex::new(String::new()),
+            listen_addr: Mutex::new(None),
         }
     }
 
@@ -151,6 +153,10 @@ impl TunerHost {
             }
         };
         listener.set_nonblocking(false).ok();
+        if let Ok(addr) = listener.local_addr() {
+            *self.listen_addr.lock().unwrap() = Some(addr);
+        }
+        self.stop.store(false, Ordering::SeqCst);
         let host = Arc::clone(self);
         thread::spawn(move || {
             for incoming in listener.incoming() {
@@ -170,6 +176,14 @@ impl TunerHost {
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+        if let Ok(guard) = self.listen_addr.lock() {
+            if let Some(addr) = *guard {
+                let _ = std::net::TcpStream::connect_timeout(
+                    &addr,
+                    std::time::Duration::from_millis(80),
+                );
+            }
+        }
     }
 }
 

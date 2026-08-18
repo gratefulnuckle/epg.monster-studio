@@ -177,7 +177,7 @@ impl Default for AppSettings {
             discovery_enabled: true,
             remux_engine: "ffmpeg".into(),
             remux_profile: "mpeg2_ac3".into(),
-            remux_buffer_kb: 4096,
+            remux_buffer_kb: 2048,
             weekly_audit_json: String::new(),
             weekly_audit_auto_run: false,
             black_detect_enabled: false,

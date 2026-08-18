@@ -26,8 +26,10 @@ use studio_core::tools::{
     default_ffmpeg_path, default_ffprobe_path, default_mpv_path, default_vlc_path, detect_bundled,
 };
 use studio_core::{
-    display_version, github_open_studio_issues, latest_github_tag, DISPLAY_NAME, VERSION,
+    display_version, github_open_studio_issues, latest_github_release, latest_github_tag,
+    remote_is_newer, DISPLAY_NAME, GITHUB_RELEASES_LATEST, VERSION,
 };
+use tauri_plugin_opener::OpenerExt;
 use studio_tuner::manager::{self, TunerManager};
 use studio_tuner::host::TunerSnapshot;
 use tauri::{Emitter, Manager};
@@ -37,6 +39,14 @@ struct AppState {
     store: Arc<Mutex<SqliteStore>>,
     audit: Mutex<audit::ProcessStore>,
     tuner: Mutex<TunerManager>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SelfTestDto {
+    json: String,
+    path: String,
+    reports: Vec<studio_tuner::probe::TunerProbeReport>,
 }
 
 #[derive(Serialize)]
@@ -155,6 +165,81 @@ fn lock_audit<'a>(
     state: &'a tauri::State<'a, AppState>,
 ) -> Result<std::sync::MutexGuard<'a, audit::ProcessStore>, String> {
     state.audit.lock().map_err(|e| e.to_string())
+}
+
+fn spawn_audit_worker(store: Arc<Mutex<SqliteStore>>) {
+    audit::clear_interrupt();
+    let _ = std::thread::Builder::new()
+        .name("stream-audit".into())
+        .spawn(move || {
+            let process = match audit::ProcessStore::open(None) {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            loop {
+                match audit::interrupt_kind() {
+                    audit::Interrupt::None => {}
+                    kind => {
+                        if let Ok(Some(mut job)) = process.load_job() {
+                            if kind == audit::Interrupt::Cancel {
+                                job.state = "cancelled".into();
+                                job.finished_at = Some(audit::now_iso());
+                            } else {
+                                job.state = "paused".into();
+                            }
+                            let _ = process.update_job(&job);
+                        }
+                        break;
+                    }
+                }
+                let settings = match store.lock() {
+                    Ok(s) => s.load_settings().ok(),
+                    Err(_) => None,
+                };
+                let Some(settings) = settings else {
+                    break;
+                };
+                if audit::player_is_active() && settings.pause_audit_while_playing {
+                    let _ = process.add_elapsed_ms(400);
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    continue;
+                }
+                let step = match store.lock() {
+                    Ok(s) => audit::next_step(&s, &process, &settings),
+                    Err(_) => break,
+                };
+                match step {
+                    Ok(s) if s.done || s.job.state != "running" => break,
+                    Ok(_) => {
+                        let delay = settings.audit_delay_ms.max(0) as u64;
+                        let mut left = delay;
+                        while left > 0 {
+                            if audit::interrupt_kind() != audit::Interrupt::None {
+                                break;
+                            }
+                            let d = 100u64.min(left);
+                            std::thread::sleep(std::time::Duration::from_millis(d));
+                            let _ = process.add_elapsed_ms(d as i64);
+                            left -= d;
+                        }
+                    }
+                    Err(_) => {
+                        if audit::interrupt_kind() != audit::Interrupt::None {
+                            if let Ok(Some(mut job)) = process.load_job() {
+                                if audit::interrupt_kind() == audit::Interrupt::Cancel {
+                                    job.state = "cancelled".into();
+                                    job.finished_at = Some(audit::now_iso());
+                                } else {
+                                    job.state = "paused".into();
+                                }
+                                let _ = process.update_job(&job);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        });
 }
 
 fn app_root(app: &tauri::AppHandle) -> std::path::PathBuf {
@@ -286,19 +371,17 @@ struct SplashEpgStatus {
 fn check_app_update() -> Result<SplashCheck, String> {
     match latest_github_tag() {
         Ok(tag) => {
-            let local = VERSION.trim_start_matches('v');
-            let remote = tag.trim_start_matches('v');
-            if remote == local || tag == VERSION {
+            if remote_is_newer(&tag, VERSION) {
                 Ok(SplashCheck {
                     label: "Checking github for updates".into(),
                     ok: true,
-                    detail: format!("up to date ({tag})"),
+                    detail: format!("update {tag}"),
                 })
             } else {
                 Ok(SplashCheck {
                     label: "Checking github for updates".into(),
                     ok: true,
-                    detail: format!("update {tag}"),
+                    detail: format!("up to date ({tag})"),
                 })
             }
         }
@@ -308,6 +391,95 @@ fn check_app_update() -> Result<SplashCheck, String> {
             detail: splash_shorten(&e),
         }),
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StudioUpdateDto {
+    current: String,
+    display_version: String,
+    latest: Option<String>,
+    update_available: bool,
+    release_url: String,
+    notes: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostInfoDto {
+    os: String,
+    arch: String,
+    host: String,
+    exe_suffix: String,
+}
+
+#[tauri::command]
+fn host_info() -> HostInfoDto {
+    let os = if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    HostInfoDto {
+        os: os.into(),
+        arch: std::env::consts::ARCH.into(),
+        host: studio_core::bootstrap::current_host(),
+        exe_suffix: if cfg!(windows) { ".exe".into() } else { String::new() },
+    }
+}
+
+#[tauri::command]
+fn check_studio_update() -> StudioUpdateDto {
+    let current = VERSION.to_string();
+    match latest_github_release() {
+        Ok(rel) => {
+            let notes = rel.body.map(|b| {
+                let t = b.trim();
+                if t.chars().count() > 400 {
+                    format!("{}…", t.chars().take(400).collect::<String>())
+                } else {
+                    t.to_string()
+                }
+            });
+            StudioUpdateDto {
+                current,
+                display_version: display_version(),
+                latest: Some(rel.tag.clone()),
+                update_available: remote_is_newer(&rel.tag, VERSION),
+                release_url: if rel.html_url.is_empty() {
+                    GITHUB_RELEASES_LATEST.to_string()
+                } else {
+                    rel.html_url
+                },
+                notes,
+                error: None,
+            }
+        }
+        Err(e) => StudioUpdateDto {
+            current,
+            display_version: display_version(),
+            latest: None,
+            update_available: false,
+            release_url: GITHUB_RELEASES_LATEST.to_string(),
+            notes: None,
+            error: Some(e),
+        },
+    }
+}
+
+#[tauri::command]
+fn open_latest_release(app: tauri::AppHandle) -> Result<String, String> {
+    let url = match latest_github_release() {
+        Ok(rel) if !rel.html_url.is_empty() => rel.html_url,
+        _ => GITHUB_RELEASES_LATEST.to_string(),
+    };
+    app.opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    Ok(url)
 }
 
 #[tauri::command]
@@ -577,6 +749,11 @@ fn play_url(
             .find(|s| s.id == id)
             .and_then(|s| serde_json::from_str(&s.headers_json).ok())
     });
+    audit::set_player_active(true);
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        audit::set_player_active(false);
+    });
     player::play(&url, &settings, headers.as_ref(), &app_root(&app))
 }
 
@@ -631,9 +808,13 @@ fn get_managed(state: tauri::State<AppState>, id: String) -> Result<Option<Manag
 }
 
 #[tauri::command]
-fn save_managed(state: tauri::State<AppState>, channel: ManagedChannel) -> Result<(), String> {
+fn save_managed(
+    state: tauri::State<AppState>,
+    channel: ManagedChannel,
+    primary_url: Option<String>,
+) -> Result<(), String> {
     lock_store(&state)?
-        .upsert_managed(&channel)
+        .save_managed_channel(&channel, primary_url.as_deref())
         .map_err(|e| e.to_string())
 }
 
@@ -727,7 +908,7 @@ fn import_curated(
 ) -> Result<String, String> {
     let picked = tauri_plugin_dialog::DialogExt::dialog(&app)
         .file()
-        .add_filter("Playlists", &["m3u", "m3u8"])
+        .add_filter("Playlists", &["m3u", "m3u8", "txt"])
         .blocking_pick_file();
     let Some(file) = picked else {
         return Ok("cancelled".into());
@@ -741,7 +922,23 @@ fn import_curated(
     let (added, skipped) = lock_store(&state)?
         .import_curated(&content, replace, label)
         .map_err(|e| e.to_string())?;
-    Ok(format!("Imported {added}, skipped {skipped} already present."))
+    Ok(format!(
+        "Imported +{added} channels ({skipped} skipped as duplicates)"
+    ))
+}
+
+#[tauri::command]
+fn add_missing_from_source(
+    state: tauri::State<AppState>,
+    entry_ids: Vec<String>,
+    source_label: Option<String>,
+) -> Result<String, String> {
+    let (added, skipped) = lock_store(&state)?
+        .add_missing_from_source_entries(&entry_ids, source_label.as_deref())
+        .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "Added {added} new channel(s); skipped {skipped} already managed"
+    ))
 }
 
 #[tauri::command]
@@ -1038,7 +1235,13 @@ fn load_settings(state: tauri::State<AppState>) -> Result<AppSettings, String> {
 }
 
 #[tauri::command]
-fn save_settings(state: tauri::State<AppState>, settings: AppSettings) -> Result<(), String> {
+fn save_settings(state: tauri::State<AppState>, mut settings: AppSettings) -> Result<(), String> {
+    let snap = tuner_snapshot_fn(Arc::clone(&state.store));
+    state
+        .tuner
+        .lock()
+        .map_err(|e| e.to_string())?
+        .apply(&mut settings, snap);
     lock_store(&state)?
         .save_settings(&settings)
         .map_err(|e| e.to_string())
@@ -1150,17 +1353,24 @@ fn open_folder(path: String) -> Result<(), String> {
         p.parent().map(|d| d.to_path_buf())
     } {
         let _ = std::fs::create_dir_all(&dir);
-        #[cfg(windows)]
+        #[cfg(target_os = "windows")]
         {
             std::process::Command::new("explorer")
-                .arg(dir)
+                .arg(&dir)
                 .spawn()
                 .map_err(|e| e.to_string())?;
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open")
+                .arg(&dir)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
             std::process::Command::new("xdg-open")
-                .arg(dir)
+                .arg(&dir)
                 .spawn()
                 .map_err(|e| e.to_string())?;
         }
@@ -1618,8 +1828,10 @@ fn audit_begin(
             return Err("Audit already running.".into());
         }
     }
-    let settings = store.load_settings().map_err(|e| e.to_string())?;
-    audit::begin_job(
+    let mut settings = store.load_settings().map_err(|e| e.to_string())?;
+    settings.auto_swap_on_audit_fail = auto_swap;
+    store.save_settings(&settings).map_err(|e| e.to_string())?;
+    let job = audit::begin_job(
         &store,
         &process,
         &settings,
@@ -1627,7 +1839,21 @@ fn audit_begin(
         visible_only,
         channel_ids.as_deref(),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    drop(process);
+    drop(store);
+    spawn_audit_worker(state.store.clone());
+    Ok(job)
+}
+
+#[tauri::command]
+fn audit_interrupt(kind: String) -> Result<(), String> {
+    match kind.as_str() {
+        "paused" => audit::request_interrupt(audit::Interrupt::Pause),
+        "cancelled" => audit::request_interrupt(audit::Interrupt::Cancel),
+        _ => return Err("unknown interrupt".into()),
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1654,6 +1880,10 @@ fn audit_set_state(state: tauri::State<AppState>, next: String) -> Result<Option
             }
             job.state = "running".into();
             job.pid = std::process::id();
+            process.update_job(&job).map_err(|e| e.to_string())?;
+            drop(process);
+            spawn_audit_worker(state.store.clone());
+            return Ok(Some(job));
         }
         "cancelled" => {
             job.state = "cancelled".into();
@@ -1710,36 +1940,8 @@ fn audit_results(state: tauri::State<AppState>, job_id: Option<String>) -> Resul
         .map_err(|e| e.to_string())
 }
 
-fn make_snapshot(store: &SqliteStore) -> TunerSnapshot {
-    let settings = store.load_settings().unwrap_or_default();
-    let channels = store.list_managed(None).unwrap_or_default();
-    let ids: Vec<String> = studio_core::lineup::ordered_lineup(&channels)
-        .into_iter()
-        .map(|c| studio_core::hdhr::channel_xml_id(&c))
-        .filter(|s| !s.is_empty())
-        .collect();
-    let programmes = store
-        .list_programmes(&ids, "1970-01-01T00:00:00Z", "2099-01-01T00:00:00Z")
-        .unwrap_or_default();
-    let mut snap = manager::snapshot_from_settings(channels, programmes, &settings);
-    snap.variant_headers = store.headers_for_channels(&snap.channels);
-    snap
-}
-
-fn persist_settings(state: &tauri::State<AppState>, settings: &AppSettings) -> Result<(), String> {
-    lock_store(state)?.save_settings(settings).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn tuner_statuses(state: tauri::State<AppState>) -> Result<Vec<manager::TunerRuntimeStatus>, String> {
-    let settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
-    Ok(state.tuner.lock().map_err(|e| e.to_string())?.all_statuses(&settings))
-}
-
-#[tauri::command]
-fn tuner_start(state: tauri::State<AppState>, kind: String) -> Result<String, String> {
-    let store = Arc::clone(&state.store);
-    let snap: Arc<dyn Fn() -> TunerSnapshot + Send + Sync> = Arc::new(move || {
+fn tuner_snapshot_fn(store: Arc<Mutex<SqliteStore>>) -> Arc<dyn Fn() -> TunerSnapshot + Send + Sync> {
+    Arc::new(move || {
         let g = store.lock().ok();
         match g {
             Some(s) => {
@@ -1768,7 +1970,38 @@ fn tuner_start(state: tauri::State<AppState>, kind: String) -> Result<String, St
             }
             None => TunerSnapshot::default(),
         }
-    });
+    })
+}
+
+fn make_snapshot(store: &SqliteStore) -> TunerSnapshot {
+    let settings = store.load_settings().unwrap_or_default();
+    let channels = store.list_managed(None).unwrap_or_default();
+    let ids: Vec<String> = studio_core::lineup::ordered_lineup(&channels)
+        .into_iter()
+        .map(|c| studio_core::hdhr::channel_xml_id(&c))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let programmes = store
+        .list_programmes(&ids, "1970-01-01T00:00:00Z", "2099-01-01T00:00:00Z")
+        .unwrap_or_default();
+    let mut snap = manager::snapshot_from_settings(channels, programmes, &settings);
+    snap.variant_headers = store.headers_for_channels(&snap.channels);
+    snap
+}
+
+fn persist_settings(state: &tauri::State<AppState>, settings: &AppSettings) -> Result<(), String> {
+    lock_store(state)?.save_settings(settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn tuner_statuses(state: tauri::State<AppState>) -> Result<Vec<manager::TunerRuntimeStatus>, String> {
+    let settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
+    Ok(state.tuner.lock().map_err(|e| e.to_string())?.all_statuses(&settings))
+}
+
+#[tauri::command]
+fn tuner_start(state: tauri::State<AppState>, kind: String) -> Result<String, String> {
+    let snap = tuner_snapshot_fn(Arc::clone(&state.store));
     let mut settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
     let mut tuner = state.tuner.lock().map_err(|e| e.to_string())?;
     tuner.try_start(&mut settings, &kind, snap)?;
@@ -1826,12 +2059,20 @@ fn tuner_set_max(state: tauri::State<AppState>, kind: String, max: i32) -> Resul
 }
 
 #[tauri::command]
-fn tuner_self_test(state: tauri::State<AppState>) -> Result<String, String> {
+fn tuner_self_test(state: tauri::State<AppState>) -> Result<SelfTestDto, String> {
     let settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
     let statuses = state.tuner.lock().map_err(|e| e.to_string())?.all_statuses(&settings);
     drop(settings);
-    let (_reports, json) = manager::self_test(&statuses);
-    Ok(json)
+    let (reports, json) = manager::self_test(&statuses);
+    let path = studio_core::paths::app_data_directory()
+        .join("tunertest.json")
+        .to_string_lossy()
+        .into_owned();
+    Ok(SelfTestDto {
+        json,
+        path,
+        reports,
+    })
 }
 
 #[tauri::command]
@@ -1840,8 +2081,15 @@ fn tuner_logs(state: tauri::State<AppState>) -> Result<Vec<manager::TunerLogLine
 }
 
 #[tauri::command]
-fn tuner_graphs(state: tauri::State<AppState>) -> Result<Vec<String>, String> {
-    Ok(state.tuner.lock().map_err(|e| e.to_string())?.graphs())
+fn tuner_clear_logs(state: tauri::State<AppState>) -> Result<(), String> {
+    state.tuner.lock().map_err(|e| e.to_string())?.clear_logs();
+    Ok(())
+}
+
+#[tauri::command]
+fn tuner_graphs(state: tauri::State<AppState>) -> Result<Vec<manager::TunerGraphRow>, String> {
+    let settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
+    Ok(state.tuner.lock().map_err(|e| e.to_string())?.graph_rows(&settings))
 }
 
 #[tauri::command]
@@ -1881,14 +2129,20 @@ pub fn run() {
     let store = SqliteStore::open(&db).expect("open studio database");
     let audit_store = audit::ProcessStore::open(None).expect("open auditprocess database");
     let _ = app_data_directory();
+    let store = Arc::new(Mutex::new(store));
+    let mut tuner = TunerManager::new();
+    if let Ok(mut settings) = store.lock().expect("store").load_settings() {
+        tuner.apply(&mut settings, tuner_snapshot_fn(Arc::clone(&store)));
+        let _ = store.lock().expect("store").save_settings(&settings);
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
-            store: Arc::new(Mutex::new(store)),
+            store,
             audit: Mutex::new(audit_store),
-            tuner: Mutex::new(TunerManager::new()),
+            tuner: Mutex::new(tuner),
         })
         .setup(|app| {
             studio_core::crash::append_log("Info", "App", "OnLaunched");
@@ -1954,6 +2208,9 @@ pub fn run() {
             splash_checks,
             splash_epg_status,
             check_app_update,
+            check_studio_update,
+            open_latest_release,
+            host_info,
             check_github_issues,
             promote_main_window,
             detect_bundled_tools,
@@ -1985,6 +2242,7 @@ pub fn run() {
             now_playing,
             is_known_tvg,
             add_from_source,
+            add_missing_from_source,
             import_curated,
             export_managed,
             output_summary,
@@ -2000,6 +2258,7 @@ pub fn run() {
             tuner_set_max,
             tuner_self_test,
             tuner_logs,
+            tuner_clear_logs,
             tuner_graphs,
             tuner_help,
             clear_managed,
@@ -2038,6 +2297,7 @@ pub fn run() {
             logo_search_urls,
             audit_snapshot,
             audit_begin,
+            audit_interrupt,
             audit_next,
             audit_set_state,
             audit_discard,

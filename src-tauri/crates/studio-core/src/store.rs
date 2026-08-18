@@ -6,6 +6,7 @@ use std::path::Path;
 use rusqlite::{params, Connection};
 use thiserror::Error;
 
+use crate::epg::clean_epg_token;
 use crate::models::{
     CatalogEntry, ChannelEntry, EpgSuggestion, ManagedChannel, NowPlaying, PlaylistSource,
     StreamVariant,
@@ -25,6 +26,34 @@ pub enum StoreError {
 
 pub struct SqliteStore {
     conn: Connection,
+}
+
+fn tvg_lookup_ids(tvg_id: &str) -> Vec<String> {
+    let raw = tvg_id.trim().to_string();
+    let cleaned = clean_epg_token(&raw);
+    let mut out = Vec::new();
+    for cand in [
+        raw,
+        cleaned.clone(),
+        cleaned.replace(' ', "."),
+        cleaned.replace('.', " "),
+    ] {
+        if !cand.is_empty() && !out.iter().any(|s| s == &cand) {
+            out.push(cand);
+        }
+    }
+    out
+}
+
+fn parse_rfc3339(s: &str) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+}
+
+fn format_short_time(dt: time::OffsetDateTime) -> String {
+    dt.format(&time::macros::format_description!(
+        "[hour repr:12 padding:none]:[minute] [period case:upper]"
+    ))
+    .unwrap_or_else(|_| dt.to_string())
 }
 
 impl SqliteStore {
@@ -665,6 +694,54 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Persist editor Save: blank group → Ungrouped; non-empty primary URL writes the visible variant.
+    pub fn save_managed_channel(
+        &self,
+        ch: &ManagedChannel,
+        primary_url: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let mut ch = ch.clone();
+        let group = ch.group_title.trim();
+        ch.group_title = if group.is_empty() {
+            "Ungrouped".into()
+        } else {
+            group.to_string()
+        };
+        self.upsert_managed(&ch)?;
+        let Some(url) = primary_url.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(());
+        };
+        self.set_visible_url(&ch.id, url)
+    }
+
+    fn set_visible_url(&self, managed_id: &str, url: &str) -> Result<(), StoreError> {
+        let mut variants = self.get_variants(managed_id)?;
+        if let Some(i) = variants
+            .iter()
+            .position(|v| v.visibility == "visible")
+            .or_else(|| variants.first().map(|_| 0))
+        {
+            if variants[i].url != url {
+                variants[i].url = url.to_string();
+                self.upsert_variant(&variants[i])?;
+            }
+            return Ok(());
+        }
+        self.upsert_variant(&StreamVariant {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            managed_channel_id: managed_id.to_string(),
+            url: url.to_string(),
+            label: Some("primary".into()),
+            source_entry_id: None,
+            origin_name: None,
+            origin_tvg_id: None,
+            visibility: "visible".into(),
+            priority: 0,
+            last_audit_ok: None,
+            last_audit_at: None,
+        })
+    }
+
     pub fn clear_managed(&self) -> Result<(), StoreError> {
         self.conn.execute_batch("DELETE FROM stream_variants; DELETE FROM managed_channels;")?;
         Ok(())
@@ -934,6 +1011,14 @@ impl SqliteStore {
     }
 
     pub fn add_from_source_entry(&self, entry_id: &str) -> Result<ManagedChannel, StoreError> {
+        self.add_from_source_entry_labeled(entry_id, None)
+    }
+
+    pub fn add_from_source_entry_labeled(
+        &self,
+        entry_id: &str,
+        source_label: Option<&str>,
+    ) -> Result<ManagedChannel, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, source_id, group_title, name, tvg_id, tvg_name, tvg_logo, url, attrs_json, line_no
              FROM channel_entries WHERE id = ?1",
@@ -942,10 +1027,15 @@ impl SqliteStore {
             .into_iter()
             .next()
             .ok_or_else(|| StoreError::Io(std::io::Error::other("source row not found")))?;
+        let group = if entry.group_title.trim().is_empty() {
+            "Ungrouped".to_string()
+        } else {
+            entry.group_title.clone()
+        };
         let ch = ManagedChannel {
             id: uuid::Uuid::new_v4().simple().to_string(),
             name: entry.name.clone(),
-            group_title: "Unassigned".into(),
+            group_title: group,
             tvg_id: entry.tvg_id.clone(),
             tvg_logo: entry.tvg_logo.clone(),
             notes: None,
@@ -957,11 +1047,15 @@ impl SqliteStore {
             has_epg_match: false,
         };
         self.upsert_managed(&ch)?;
+        let label = source_label
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("primary");
         let v = StreamVariant {
             id: uuid::Uuid::new_v4().simple().to_string(),
             managed_channel_id: ch.id.clone(),
             url: entry.url,
-            label: Some("primary".into()),
+            label: Some(label.into()),
             source_entry_id: Some(entry.id),
             origin_name: Some(entry.name),
             origin_tvg_id: entry.tvg_id,
@@ -972,6 +1066,48 @@ impl SqliteStore {
         };
         self.upsert_variant(&v)?;
         Ok(self.get_managed(&ch.id)?.unwrap())
+    }
+
+    pub fn add_missing_from_source_entries(
+        &self,
+        entry_ids: &[String],
+        source_label: Option<&str>,
+    ) -> Result<(i32, i32), StoreError> {
+        let existing = self.list_managed(None)?;
+        let mut keys: HashSet<(String, String)> = existing
+            .iter()
+            .map(|c| {
+                (
+                    c.name.trim().to_ascii_lowercase(),
+                    c.tvg_id
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim()
+                        .to_ascii_lowercase(),
+                )
+            })
+            .collect();
+        let mut added = 0i32;
+        let mut skipped = 0i32;
+        for id in entry_ids {
+            let ch = self.add_from_source_entry_labeled(id, source_label)?;
+            let key = (
+                ch.name.trim().to_ascii_lowercase(),
+                ch.tvg_id
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase(),
+            );
+            if keys.contains(&key) {
+                self.delete_managed(&ch.id)?;
+                skipped += 1;
+                continue;
+            }
+            keys.insert(key);
+            added += 1;
+        }
+        Ok((added, skipped))
     }
 
     pub fn is_known_tvg_id(&self, tvg_id: Option<&str>) -> bool {
@@ -1020,36 +1156,58 @@ impl SqliteStore {
     }
 
     pub fn now_playing(&self, tvg_id: &str, shift_hours: f64) -> Result<Option<NowPlaying>, StoreError> {
+        let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+        self.now_playing_at(tvg_id, shift_hours, time::OffsetDateTime::now_utc(), offset)
+    }
+
+    pub fn now_playing_at(
+        &self,
+        tvg_id: &str,
+        shift_hours: f64,
+        now_utc: time::OffsetDateTime,
+        local_offset: time::UtcOffset,
+    ) -> Result<Option<NowPlaying>, StoreError> {
         if tvg_id.trim().is_empty() {
             return Ok(None);
         }
         let shift = time::Duration::seconds((shift_hours * 3600.0) as i64);
-        let effective = time::OffsetDateTime::now_utc() - shift;
+        let effective = now_utc - shift;
         let t = effective
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_default();
-        let row = self.conn.query_row(
-            "SELECT title, start_utc, stop_utc FROM epg_programmes
-             WHERE tvg_id = ?1 COLLATE NOCASE AND start_utc <= ?2 AND stop_utc > ?2
-             ORDER BY start_utc DESC LIMIT 1",
-            params![tvg_id.trim(), t],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            },
-        );
-        match row {
-            Ok((title, start, stop)) => Ok(Some(NowPlaying {
-                title,
-                start_local: start,
-                stop_local: stop,
-            })),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
+        for id in tvg_lookup_ids(tvg_id) {
+            let row = self.conn.query_row(
+                "SELECT title, start_utc, stop_utc FROM epg_programmes
+                 WHERE tvg_id = ?1 COLLATE NOCASE AND start_utc <= ?2 AND stop_utc > ?2
+                 ORDER BY start_utc DESC LIMIT 1",
+                params![id, t],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            );
+            match row {
+                Ok((title, start, stop)) => {
+                    let start_dt = parse_rfc3339(&start).ok_or_else(|| {
+                        StoreError::Io(std::io::Error::other("bad programme start"))
+                    })?;
+                    let stop_dt = parse_rfc3339(&stop).ok_or_else(|| {
+                        StoreError::Io(std::io::Error::other("bad programme stop"))
+                    })?;
+                    return Ok(Some(NowPlaying {
+                        title,
+                        start_local: format_short_time((start_dt + shift).to_offset(local_offset)),
+                        stop_local: format_short_time((stop_dt + shift).to_offset(local_offset)),
+                    }));
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                Err(e) => return Err(e.into()),
+            }
         }
+        Ok(None)
     }
 
     pub fn replace_epg_catalog(&self, entries: &[CatalogEntry]) -> Result<(), StoreError> {
@@ -1548,5 +1706,151 @@ mod tests {
         let (a2, s2) = store.import_curated(m3u, false, "file").unwrap();
         assert_eq!(a2, 0);
         assert_eq!(s2, 1);
+    }
+
+    fn sample_channel(id: &str, group: &str) -> ManagedChannel {
+        ManagedChannel {
+            id: id.into(),
+            name: "CNN".into(),
+            group_title: group.into(),
+            tvg_id: Some("CNN.us".into()),
+            tvg_logo: None,
+            notes: None,
+            sort_order: 0,
+            tvg_shift_hours: 0.0,
+            in_tuner: false,
+            tuner_number: None,
+            variants: vec![],
+            has_epg_match: false,
+        }
+    }
+
+    #[test]
+    fn save_managed_blank_group_becomes_ungrouped() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        store
+            .save_managed_channel(&sample_channel("c1", "   "), Some("http://a"))
+            .unwrap();
+        let loaded = store.get_managed("c1").unwrap().unwrap();
+        assert_eq!(loaded.group_title, "Ungrouped");
+    }
+
+    #[test]
+    fn save_managed_updates_existing_visible_url() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        store.upsert_managed(&sample_channel("c1", "News")).unwrap();
+        store.add_stream("c1", "http://old", Some("primary")).unwrap();
+        store.add_stream("c1", "http://backup", Some("B")).unwrap();
+        store
+            .save_managed_channel(&sample_channel("c1", "News"), Some("http://new"))
+            .unwrap();
+        let loaded = store.get_managed("c1").unwrap().unwrap();
+        let visible = loaded
+            .variants
+            .iter()
+            .find(|v| v.visibility == "visible")
+            .unwrap();
+        assert_eq!(visible.url, "http://new");
+        assert_eq!(loaded.variants.len(), 2);
+        assert!(loaded.variants.iter().any(|v| v.url == "http://backup"));
+    }
+
+    #[test]
+    fn save_managed_creates_visible_when_none() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        store
+            .save_managed_channel(&sample_channel("c1", "News"), Some("http://first"))
+            .unwrap();
+        let loaded = store.get_managed("c1").unwrap().unwrap();
+        assert_eq!(loaded.variants.len(), 1);
+        assert_eq!(loaded.variants[0].url, "http://first");
+        assert_eq!(loaded.variants[0].visibility, "visible");
+        assert_eq!(loaded.variants[0].label.as_deref(), Some("primary"));
+    }
+
+    #[test]
+    fn save_managed_empty_primary_leaves_variants() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        store.upsert_managed(&sample_channel("c1", "News")).unwrap();
+        store.add_stream("c1", "http://old", None).unwrap();
+        store
+            .save_managed_channel(&sample_channel("c1", "News"), Some("  "))
+            .unwrap();
+        let loaded = store.get_managed("c1").unwrap().unwrap();
+        assert_eq!(loaded.variants[0].url, "http://old");
+    }
+
+    #[test]
+    fn add_from_source_keeps_entry_group() {
+        let dir = tempdir().unwrap();
+        let playlist = dir.path().join("list.m3u");
+        std::fs::write(
+            &playlist,
+            "#EXTM3U\n#EXTINF:-1 group-title=\"News\",CNN\nhttp://example.com/cnn\n",
+        )
+        .unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        let src = store.add_file_source(&playlist).unwrap();
+        let entries = store.channels_by_group(&src.id, "News").unwrap();
+        let ch = store.add_from_source_entry(&entries[0].id).unwrap();
+        assert_eq!(ch.group_title, "News");
+    }
+
+    #[test]
+    fn add_missing_skips_same_name_and_tvg() {
+        let dir = tempdir().unwrap();
+        let playlist = dir.path().join("list.m3u");
+        std::fs::write(
+            &playlist,
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"CNN.us\" group-title=\"News\",CNN\nhttp://example.com/cnn\n#EXTINF:-1 tvg-id=\"MSNBC.us\" group-title=\"News\",MSNBC\nhttp://example.com/msnbc\n",
+        )
+        .unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        let src = store.add_file_source(&playlist).unwrap();
+        let entries = store.channels_by_group(&src.id, "News").unwrap();
+        let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
+        let (a1, s1) = store
+            .add_missing_from_source_entries(&ids, Some("NewsSrc"))
+            .unwrap();
+        assert_eq!((a1, s1), (2, 0));
+        let (a2, s2) = store
+            .add_missing_from_source_entries(&ids, Some("NewsSrc"))
+            .unwrap();
+        assert_eq!((a2, s2), (0, 2));
+    }
+
+    #[test]
+    fn now_playing_formats_local_times_and_applies_shift() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        store
+            .replace_programmes(&[(
+                "CNN.us".into(),
+                "News Hour".into(),
+                "2026-08-18T15:00:00Z".into(),
+                "2026-08-18T17:00:00Z".into(),
+            )])
+            .unwrap();
+        let now = time::OffsetDateTime::parse(
+            "2026-08-18T18:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        let utc = time::UtcOffset::UTC;
+        let hit = store
+            .now_playing_at("CNN.us", 2.0, now, utc)
+            .unwrap()
+            .expect("in window after shift");
+        assert_eq!(hit.title, "News Hour");
+        assert_eq!(hit.start_local, "5:00 PM");
+        assert_eq!(hit.stop_local, "7:00 PM");
+        assert!(store
+            .now_playing_at("CNN.us", 0.0, now, utc)
+            .unwrap()
+            .is_none());
     }
 }

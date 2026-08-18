@@ -230,6 +230,55 @@ mod tests {
     }
 
     #[test]
+    fn stop_releases_the_listen_port() {
+        let (host, base) = start_host("Plex");
+        let port: u16 = base
+            .trim_start_matches("http://127.0.0.1:")
+            .parse()
+            .unwrap();
+        host.stop();
+        let mut last = None;
+        for _ in 0..20 {
+            match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                Ok(l) => {
+                    drop(l);
+                    last = None;
+                    break;
+                }
+                Err(e) => {
+                    last = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+        }
+        assert!(
+            last.is_none(),
+            "port {port} still bound after stop: {:?}",
+            last
+        );
+    }
+
+    #[test]
+    fn apply_starts_enabled_running_profiles() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port() as i32;
+        drop(listener);
+        let mut settings = studio_core::settings::AppSettings::default();
+        settings.iptv_tuner.enabled = true;
+        settings.iptv_tuner.running = true;
+        settings.iptv_tuner.port = port;
+        let mut mgr = crate::manager::TunerManager::new();
+        mgr.apply(&mut settings, Arc::new(TunerSnapshot::default));
+        let st = mgr
+            .all_statuses(&settings)
+            .into_iter()
+            .find(|s| s.kind == "Iptv")
+            .unwrap();
+        assert!(st.running, "IPTV should start from persisted running flag");
+        mgr.stop_all(&mut settings);
+    }
+
+    #[test]
     fn lineup_without_provider_urls_passes_leak_check() {
         let (_h, base) = start_host("Emby");
         let report = probe::run("Emby", &base);
