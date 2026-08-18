@@ -12,10 +12,11 @@ use std::time::Instant;
 use studio_core::hdhr;
 use studio_core::lineup;
 use studio_core::logo;
-use studio_core::models::{EpgProgramme, ManagedChannel};
+use studio_core::models::{EpgProgramme, ManagedChannel, StreamVariant};
 use studio_core::settings::TunerServerProfile;
 
 use crate::http;
+use crate::remux::{self, RemuxStop};
 
 #[derive(Clone, Default)]
 pub struct TunerStats {
@@ -39,6 +40,35 @@ pub struct TunerSnapshot {
     pub video_codec: String,
     pub audio_codec: String,
     pub ffmpeg_path: String,
+    pub vlc_path: String,
+    pub remux_engine: String,
+    pub remux_profile: String,
+    pub remux_buffer_bytes: i32,
+    pub user_agent: String,
+    pub note_failover: Option<std::sync::Arc<dyn Fn(&ManagedChannel, &StreamVariant) + Send + Sync>>,
+}
+
+impl Default for TunerSnapshot {
+    fn default() -> Self {
+        Self {
+            channels: vec![],
+            programmes: vec![],
+            remux: true,
+            epg_url: None,
+            host_logos: false,
+            use_local_logos: false,
+            logo_root: String::new(),
+            video_codec: "H264".into(),
+            audio_codec: "AAC".into(),
+            ffmpeg_path: String::new(),
+            vlc_path: String::new(),
+            remux_engine: "ffmpeg".into(),
+            remux_profile: "mpeg2_ac3".into(),
+            remux_buffer_bytes: remux::DEFAULT_PREROLL_BYTES as i32,
+            user_agent: studio_core::USER_AGENT.into(),
+            note_failover: None,
+        }
+    }
 }
 
 pub struct TunerHost {
@@ -310,14 +340,7 @@ fn stream_channel(
         return http::write_status(stream, 404, "Not Found", Some(&extra));
     }
     let ch = ch.unwrap();
-    let url = ch
-        .variants
-        .iter()
-        .find(|v| v.visibility == "visible")
-        .or_else(|| ch.variants.first())
-        .map(|v| v.url.clone())
-        .unwrap_or_default();
-    if url.trim().is_empty() {
+    if failover_order(&ch).is_empty() {
         bump(host, |s| s.not_found += 1, 0);
         return http::write_status(stream, 404, "Not Found", None);
     }
@@ -327,49 +350,112 @@ fn stream_channel(
         bump(host, |s| s.stream += 1, 0);
         return http::write_status(stream, 503, "Busy", Some(&extra));
     }
-    let ffmpeg = snap.ffmpeg_path.clone();
-    if ffmpeg.is_empty() || !Path::new(&ffmpeg).is_file() {
+    let remux_snap = (host.snapshot)();
+    let engine = remux::parse_engine(&remux_snap.remux_engine);
+    let profile = remux::parse_profile(&remux_snap.remux_profile);
+    let effective = remux::effective_engine(engine, profile);
+    if effective == remux::RemuxEngine::Ffmpeg
+        && (remux_snap.ffmpeg_path.is_empty() || !Path::new(&remux_snap.ffmpeg_path).is_file())
+    {
         bump(host, |s| s.stream += 1, 0);
         return http::write_status(stream, 503, "No ffmpeg", None);
     }
-    host.active.fetch_add(1, Ordering::SeqCst);
-    let result = remux_copy(stream, &ffmpeg, &url);
-    host.active.fetch_sub(1, Ordering::SeqCst);
-    if result.is_err() {
-        let _ = path;
-    }
-    result
-}
-
-fn remux_copy(stream: &mut TcpStream, ffmpeg: &str, url: &str) -> std::io::Result<()> {
-    http::write_stream_headers(stream)?;
-    let mut child = match std::process::Command::new(ffmpeg)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            url,
-            "-c",
-            "copy",
-            "-f",
-            "mpegts",
-            "pipe:1",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+    if effective == remux::RemuxEngine::Vlc
+        && (remux_snap.vlc_path.is_empty() || !Path::new(&remux_snap.vlc_path).is_file())
     {
-        Ok(c) => c,
-        Err(_) => return Ok(()),
-    };
-    if let Some(mut out) = child.stdout.take() {
-        let _ = std::io::copy(&mut out, stream);
+        bump(host, |s| s.stream += 1, 0);
+        return http::write_status(stream, 503, "No VLC", None);
     }
-    let _ = child.kill();
+    let preroll = if remux_snap.remux_buffer_bytes > 0 {
+        remux_snap.remux_buffer_bytes as usize
+    } else {
+        remux::DEFAULT_PREROLL_BYTES
+    };
+    host.active.fetch_add(1, Ordering::SeqCst);
+    let mut headers_sent = false;
+    let mut bytes: u64 = 0;
+    let mut first = true;
+    for variant in failover_order(&ch) {
+        if variant.url.trim().is_empty() {
+            continue;
+        }
+        if !first && bytes == 0 {
+            if let Some(cb) = &remux_snap.note_failover {
+                cb(&ch, variant);
+            }
+        }
+        first = false;
+        let mut dest = FirstWrite {
+            inner: &mut *stream,
+            headers_sent: &mut headers_sent,
+            bytes: &mut bytes,
+        };
+        let stop = remux::copy(
+            engine,
+            profile,
+            &remux_snap.ffmpeg_path,
+            &remux_snap.vlc_path,
+            &variant.url,
+            None,
+            &remux_snap.user_agent,
+            preroll,
+            &mut dest,
+        );
+        if stop == RemuxStop::ClientGone {
+            break;
+        }
+    }
+    host.active.fetch_sub(1, Ordering::SeqCst);
+    let _ = path;
+    if !headers_sent {
+        bump(host, |s| s.stream += 1, 0);
+        return http::write_status(stream, 503, "No stream", None);
+    }
+    bump(host, |s| s.stream += 1, bytes as usize);
     let _ = stream.flush();
     Ok(())
+}
+
+pub fn failover_order(ch: &ManagedChannel) -> Vec<&StreamVariant> {
+    let vis = ch.variants.iter().find(|v| v.visibility == "visible");
+    let mut out = Vec::new();
+    if let Some(v) = vis {
+        out.push(v);
+    }
+    let mut backups: Vec<&StreamVariant> = ch
+        .variants
+        .iter()
+        .filter(|v| v.visibility == "hidden_backup" && !v.url.trim().is_empty())
+        .collect();
+    backups.sort_by_key(|v| v.priority);
+    for b in backups {
+        if vis.is_some_and(|v| v.id == b.id) {
+            continue;
+        }
+        out.push(b);
+    }
+    out
+}
+
+struct FirstWrite<'a> {
+    inner: &'a mut TcpStream,
+    headers_sent: &'a mut bool,
+    bytes: &'a mut u64,
+}
+
+impl Write for FirstWrite<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if !*self.headers_sent {
+            http::write_stream_headers(self.inner)?;
+            *self.headers_sent = true;
+        }
+        let n = self.inner.write(buf)?;
+        *self.bytes += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 fn parse_channel(path: &str) -> Option<i32> {
@@ -397,9 +483,17 @@ fn bump(host: &TunerHost, f: impl FnOnce(&mut TunerStats), bytes: usize) {
 }
 
 pub fn lan_ipv4() -> Vec<String> {
-    let ips = Vec::new();
-    if let Ok(iter) = std::net::ToSocketAddrs::to_socket_addrs(&("localhost", 0)) {
-        let _ = iter;
+    let mut ips = Vec::new();
+    if let Ok(s) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if s.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = s.local_addr() {
+                if let std::net::IpAddr::V4(v) = addr.ip() {
+                    if !v.is_loopback() && !v.is_unspecified() {
+                        ips.push(v.to_string());
+                    }
+                }
+            }
+        }
     }
     ips
 }

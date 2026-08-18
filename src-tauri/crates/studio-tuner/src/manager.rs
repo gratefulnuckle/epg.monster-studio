@@ -6,8 +6,10 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use studio_core::settings::{AppSettings, TunerServerProfile};
 
-use crate::host::{TunerHost, TunerSnapshot};
+use crate::discovery::DiscoveryHost;
+use crate::host::{self, TunerHost, TunerSnapshot};
 use crate::probe;
+use crate::remux;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +63,7 @@ pub struct TunerManager {
     hosts: HashMap<String, Arc<TunerHost>>,
     errors: HashMap<String, String>,
     logs: Vec<TunerLogLine>,
+    discovery: DiscoveryHost,
 }
 
 impl TunerManager {
@@ -69,6 +72,7 @@ impl TunerManager {
             hosts: HashMap::new(),
             errors: HashMap::new(),
             logs: Vec::new(),
+            discovery: DiscoveryHost::new(),
         }
     }
 
@@ -93,29 +97,42 @@ impl TunerManager {
         snapshot: Arc<dyn Fn() -> TunerSnapshot + Send + Sync>,
     ) -> Result<(), String> {
         settings.ensure_tuner_profiles();
-        let profile = profile_mut(settings, kind)?;
-        if !profile.enabled {
-            return Err(
-                "This tuner is off in Settings. Check Plex / Jellyfin / Emby / IPTV and click Save."
-                    .into(),
-            );
-        }
-        self.log(kind, &format!("Start requested on port {}", profile.port));
-        if self.hosts.contains_key(kind) {
-            profile.running = true;
+        let cloned = {
+            let profile = profile_mut(settings, kind)?;
+            if !profile.enabled {
+                return Err(
+                    "This tuner is off in Settings. Check Plex / Jellyfin / Emby / IPTV and click Save."
+                        .into(),
+                );
+            }
+            self.log(kind, &format!("Start requested on port {}", profile.port));
+            if self.hosts.contains_key(kind) {
+                profile.running = true;
+                None
+            } else {
+                Some(profile.clone())
+            }
+        };
+        if cloned.is_none() {
+            self.sync_discovery(settings);
             return Ok(());
         }
-        let host = Arc::new(TunerHost::new(profile.clone(), snapshot));
+        let host = Arc::new(TunerHost::new(cloned.unwrap(), snapshot));
         match host.start() {
             Ok(()) => {
-                profile.running = true;
+                if let Ok(p) = profile_mut(settings, kind) {
+                    p.running = true;
+                }
                 self.errors.remove(kind);
                 self.hosts.insert(kind.to_string(), host);
                 self.log(kind, "Listening");
+                self.sync_discovery(settings);
                 Ok(())
             }
             Err(e) => {
-                profile.running = false;
+                if let Ok(p) = profile_mut(settings, kind) {
+                    p.running = false;
+                }
                 self.errors.insert(kind.to_string(), e.clone());
                 self.log(kind, &e);
                 Err(e)
@@ -131,6 +148,7 @@ impl TunerManager {
             h.stop();
         }
         self.log(kind, "Stop requested");
+        self.sync_discovery(settings);
     }
 
     pub fn stop_all(&mut self, settings: &mut AppSettings) {
@@ -147,6 +165,7 @@ impl TunerManager {
             h.stop();
         }
         self.log("", "Stop all requested");
+        self.sync_discovery(settings);
     }
 
     pub fn set_max(&mut self, settings: &mut AppSettings, kind: &str, max: i32) -> Result<(), String> {
@@ -174,6 +193,36 @@ impl TunerManager {
             .into_iter()
             .filter_map(|k| self.status(settings, k))
             .collect()
+    }
+
+    fn sync_discovery(&mut self, settings: &AppSettings) {
+        for line in self.discovery.take_logs() {
+            self.log("", &line);
+        }
+        let running: Vec<&TunerServerProfile> = [
+            &settings.plex_tuner,
+            &settings.jellyfin_tuner,
+            &settings.emby_tuner,
+            &settings.iptv_tuner,
+        ]
+        .into_iter()
+        .filter(|p| p.enabled && p.running)
+        .collect();
+        let want = settings.discovery_enabled && !running.is_empty();
+        self.discovery.stop();
+        if !want {
+            return;
+        }
+        let allow_lan = running.iter().any(|p| p.allow_lan);
+        let targets: Vec<(TunerServerProfile, String)> = running
+            .into_iter()
+            .map(|p| (p.clone(), advertise_base(p)))
+            .collect();
+        self.discovery.set_targets(targets);
+        self.discovery.start(allow_lan);
+        for line in self.discovery.take_logs() {
+            self.log("", &line);
+        }
     }
 
     pub fn graphs(&self) -> Vec<String> {
@@ -273,5 +322,20 @@ pub fn snapshot_from_settings(
         video_codec: v.into(),
         audio_codec: a.into(),
         ffmpeg_path: settings.ffmpeg_path.clone(),
+        vlc_path: settings.vlc_path.clone(),
+        remux_engine: settings.remux_engine.clone(),
+        remux_profile: settings.remux_profile.clone(),
+        remux_buffer_bytes: remux::clamp_buffer_kb(settings.remux_buffer_kb) * 1024,
+        user_agent: settings.default_user_agent.clone(),
+        note_failover: None,
     }
+}
+
+fn advertise_base(p: &TunerServerProfile) -> String {
+    if p.allow_lan {
+        if let Some(ip) = host::lan_ipv4().into_iter().next() {
+            return format!("http://{ip}:{}", p.port);
+        }
+    }
+    p.base_url()
 }

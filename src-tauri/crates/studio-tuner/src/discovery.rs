@@ -133,6 +133,206 @@ fn append_string(payload: &mut Vec<u8>, tag: u8, value: &str) {
     payload.extend_from_slice(&bytes);
 }
 
+/// Listens for HDHomeRun UDP 65001 and SSDP M-SEARCH while any tuner is running.
+pub struct DiscoveryHost {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    targets: std::sync::Arc<
+        std::sync::Mutex<Vec<(TunerServerProfile, String)>>,
+    >,
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl DiscoveryHost {
+    pub fn new() -> Self {
+        Self {
+            stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            targets: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn set_targets(&self, targets: Vec<(TunerServerProfile, String)>) {
+        if let Ok(mut g) = self.targets.lock() {
+            *g = targets;
+        }
+    }
+
+    pub fn take_logs(&self) -> Vec<String> {
+        self.log.lock().map(|mut g| g.drain(..).collect()).unwrap_or_default()
+    }
+
+    pub fn start(&self, allow_lan: bool) {
+        self.start_on(allow_lan, HDHR_PORT, if allow_lan { Some(SSDP_PORT) } else { None });
+    }
+
+    pub fn start_on(&self, allow_lan: bool, hdhr_port: u16, ssdp_port: Option<u16>) {
+        self.stop();
+        self.stop.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let hdhr = bind_udp(
+            if allow_lan {
+                std::net::Ipv4Addr::UNSPECIFIED
+            } else {
+                std::net::Ipv4Addr::LOCALHOST
+            },
+            hdhr_port,
+            false,
+        );
+        if hdhr.is_none() {
+            self.push_log(&format!("HDHomeRun UDP {hdhr_port} bind failed"));
+        }
+
+        let ssdp = ssdp_port.and_then(|p| bind_udp(std::net::Ipv4Addr::UNSPECIFIED, p, true));
+        if allow_lan && ssdp_port.is_some() && ssdp.is_none() {
+            self.push_log("SSDP 1900 bind failed");
+        }
+
+        self.push_log(&format!(
+            "Discovery listening (HDHR={} SSDP={} LAN={allow_lan})",
+            hdhr.is_some(),
+            ssdp.is_some()
+        ));
+
+        let stop = std::sync::Arc::clone(&self.stop);
+        let targets = std::sync::Arc::clone(&self.targets);
+        if let Some(sock) = hdhr {
+            let stop = std::sync::Arc::clone(&stop);
+            let targets = std::sync::Arc::clone(&targets);
+            std::thread::spawn(move || pump_hdhr(sock, stop, targets));
+        }
+        if let Some(sock) = ssdp {
+            let stop = std::sync::Arc::clone(&stop);
+            let targets = std::sync::Arc::clone(&targets);
+            std::thread::spawn(move || pump_ssdp(sock, stop, targets));
+        }
+        if allow_lan {
+            let stop = std::sync::Arc::clone(&stop);
+            let targets = std::sync::Arc::clone(&targets);
+            std::thread::spawn(move || notify_loop(stop, targets));
+        }
+    }
+
+    pub fn stop(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn push_log(&self, line: &str) {
+        if let Ok(mut g) = self.log.lock() {
+            g.push(line.to_string());
+        }
+    }
+}
+
+impl Default for DiscoveryHost {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for DiscoveryHost {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn bind_udp(addr: std::net::Ipv4Addr, port: u16, multicast: bool) -> Option<std::net::UdpSocket> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .ok()?;
+    sock.set_reuse_address(true).ok()?;
+    sock.bind(&std::net::SocketAddr::from((addr, port)).into()).ok()?;
+    if multicast {
+        sock.join_multicast_v4(&std::net::Ipv4Addr::new(239, 255, 255, 250), &addr)
+            .ok()?;
+    }
+    let udp: std::net::UdpSocket = sock.into();
+    udp.set_read_timeout(Some(std::time::Duration::from_millis(250)))
+        .ok()?;
+    Some(udp)
+}
+
+fn pump_hdhr(
+    sock: std::net::UdpSocket,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    targets: std::sync::Arc<std::sync::Mutex<Vec<(TunerServerProfile, String)>>>,
+) {
+    let mut buf = [0u8; 2048];
+    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+        match sock.recv_from(&mut buf) {
+            Ok((n, from)) => {
+                if !is_discover_request(&buf[..n]) {
+                    continue;
+                }
+                let list = targets.lock().map(|g| g.clone()).unwrap_or_default();
+                for (profile, base) in list {
+                    let reply = build_discover_reply(&profile, &base);
+                    let _ = sock.send_to(&reply, from);
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::TimedOut
+                    || e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+}
+
+fn pump_ssdp(
+    sock: std::net::UdpSocket,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    targets: std::sync::Arc<std::sync::Mutex<Vec<(TunerServerProfile, String)>>>,
+) {
+    let mut buf = [0u8; 4096];
+    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+        match sock.recv_from(&mut buf) {
+            Ok((n, from)) => {
+                let text = String::from_utf8_lossy(&buf[..n]);
+                if !is_ssdp_search(&text) {
+                    continue;
+                }
+                let list = targets.lock().map(|g| g.clone()).unwrap_or_default();
+                for (profile, base) in list {
+                    let loc = format!("{}/discover.json", base.trim_end_matches('/'));
+                    let body = ssdp_search_response(&loc, &profile.device_id, studio_core::USER_AGENT);
+                    let _ = sock.send_to(body.as_bytes(), from);
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::TimedOut
+                    || e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+}
+
+fn notify_loop(
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    targets: std::sync::Arc<std::sync::Mutex<Vec<(TunerServerProfile, String)>>>,
+) {
+    let dest = std::net::SocketAddr::from((std::net::Ipv4Addr::new(239, 255, 255, 250), SSDP_PORT));
+    let send = match std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+        let list = targets.lock().map(|g| g.clone()).unwrap_or_default();
+        for (profile, base) in list {
+            let loc = format!("{}/discover.json", base.trim_end_matches('/'));
+            let body = ssdp_notify(&loc, &profile.device_id, studio_core::USER_AGENT);
+            let _ = send.send_to(body.as_bytes(), dest);
+        }
+        for _ in 0..120 {
+            if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +385,40 @@ mod tests {
         let n = ssdp_notify("http://192.168.1.10:8080/discover.json", "AABBCCDD", USER_AGENT);
         assert!(n.starts_with("NOTIFY * HTTP/1.1"));
         assert!(n.contains("ssdp:alive"));
+    }
+
+    #[test]
+    fn discovery_host_replies_on_loopback() {
+        let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let profile = TunerServerProfile {
+            kind: "Plex".into(),
+            enabled: true,
+            running: true,
+            friendly_name: "t".into(),
+            device_id: "AABBCCDD".into(),
+            tuner_count: 3,
+            bind_address: "127.0.0.1".into(),
+            port: 8080,
+            allow_lan: false,
+            remux_enabled: true,
+            downspiral_enabled: false,
+        };
+        let host = DiscoveryHost::new();
+        host.set_targets(vec![(profile, "http://127.0.0.1:8080".into())]);
+        host.start_on(false, port, None);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        sock.send_to(&[0x00, 0x02, 0x00, 0x00], ("127.0.0.1", port))
+            .unwrap();
+        let mut buf = [0u8; 512];
+        let (n, _) = sock.recv_from(&mut buf).expect("hdhr reply");
+        assert_eq!(u16::from_be_bytes([buf[0], buf[1]]), DISCOVER_RPY);
+        let tags = parse_tags(&buf[..n]);
+        assert!(String::from_utf8_lossy(&tags[&TAG_BASE_URL]).contains("127.0.0.1:8080"));
+        host.stop();
     }
 }

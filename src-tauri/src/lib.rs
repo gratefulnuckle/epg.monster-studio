@@ -1390,19 +1390,31 @@ fn tuner_start(state: tauri::State<AppState>, kind: String) -> Result<String, St
     let snap: Arc<dyn Fn() -> TunerSnapshot + Send + Sync> = Arc::new(move || {
         let g = store.lock().ok();
         match g {
-            Some(s) => make_snapshot(&s),
-            None => TunerSnapshot {
-                channels: vec![],
-                programmes: vec![],
-                remux: true,
-                epg_url: None,
-                host_logos: false,
-                use_local_logos: false,
-                logo_root: String::new(),
-                video_codec: "H264".into(),
-                audio_codec: "AAC".into(),
-                ffmpeg_path: String::new(),
-            },
+            Some(s) => {
+                let mut snap = make_snapshot(&s);
+                let store2 = Arc::clone(&store);
+                snap.note_failover = Some(Arc::new(move |ch, var| {
+                    let Ok(st) = store2.lock() else {
+                        return;
+                    };
+                    let auto = st
+                        .load_settings()
+                        .map(|cfg| cfg.auto_swap_on_audit_fail)
+                        .unwrap_or(true);
+                    if !auto {
+                        return;
+                    }
+                    let Some(vis) = ch.variants.iter().find(|v| v.visibility == "visible") else {
+                        return;
+                    };
+                    if vis.id == var.id {
+                        return;
+                    }
+                    let _ = st.swap_visible(&ch.id, &vis.id, &var.id, "live failover");
+                }));
+                snap
+            }
+            None => TunerSnapshot::default(),
         }
     });
     let mut settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;

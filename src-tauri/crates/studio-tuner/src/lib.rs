@@ -6,6 +6,7 @@ pub mod host;
 pub mod http;
 pub mod manager;
 pub mod probe;
+pub mod remux;
 
 pub const PLEX_PORT: u16 = 8080;
 pub const JELLYFIN_PORT: u16 = 8081;
@@ -33,7 +34,7 @@ mod tests {
     use studio_core::models::{ManagedChannel, StreamVariant};
     use studio_core::settings::TunerServerProfile;
 
-    use crate::host::{TunerHost, TunerSnapshot};
+    use crate::host::{self, TunerHost, TunerSnapshot};
     use crate::probe;
 
     #[test]
@@ -48,6 +49,22 @@ mod tests {
     fn legacy_hdhomerun_ports_are_reserved() {
         assert!(is_legacy_reserved_port(5004));
         assert!(!is_legacy_reserved_port(8080));
+    }
+
+    fn variant(id: &str, url: &str, vis: &str, pri: i32) -> StreamVariant {
+        StreamVariant {
+            id: id.into(),
+            managed_channel_id: "cnn".into(),
+            url: url.into(),
+            label: None,
+            source_entry_id: None,
+            origin_name: None,
+            origin_tvg_id: None,
+            visibility: vis.into(),
+            priority: pri,
+            last_audit_ok: None,
+            last_audit_at: None,
+        }
     }
 
     fn ch() -> ManagedChannel {
@@ -99,27 +116,14 @@ mod tests {
         let channels = vec![ch()];
         let snap = TunerSnapshot {
             channels,
-            programmes: vec![],
-            remux: true,
-            epg_url: None,
-            host_logos: false,
-            use_local_logos: false,
-            logo_root: String::new(),
-            video_codec: "H264".into(),
-            audio_codec: "AAC".into(),
-            ffmpeg_path: String::new(),
+            ..TunerSnapshot::default()
         };
-        let host = Arc::new(TunerHost::new(profile, Arc::new(move || TunerSnapshot {
-            channels: snap.channels.clone(),
-            programmes: snap.programmes.clone(),
-            remux: snap.remux,
-            epg_url: snap.epg_url.clone(),
-            host_logos: snap.host_logos,
-            use_local_logos: snap.use_local_logos,
-            logo_root: snap.logo_root.clone(),
-            video_codec: snap.video_codec.clone(),
-            audio_codec: snap.audio_codec.clone(),
-            ffmpeg_path: snap.ffmpeg_path.clone(),
+        let host = Arc::new(TunerHost::new(profile, Arc::new({
+            let channels = snap.channels.clone();
+            move || TunerSnapshot {
+                channels: channels.clone(),
+                ..TunerSnapshot::default()
+            }
         })));
         host.start().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -211,6 +215,18 @@ mod tests {
         assert!(json.contains("\"Kind\": \"Plex\""));
         assert!(json.contains("discover.json"));
         assert!(json.contains("epg.monster studio"));
+    }
+
+    #[test]
+    fn failover_order_visible_then_hidden_backups() {
+        let mut ch = ch();
+        ch.variants = vec![
+            variant("b", "http://b", "hidden_backup", 2),
+            variant("v", "http://v", "visible", 0),
+            variant("a", "http://a", "hidden_backup", 1),
+        ];
+        let ids: Vec<&str> = host::failover_order(&ch).into_iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["v", "a", "b"]);
     }
 
     #[test]
