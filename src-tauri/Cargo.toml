@@ -13,7 +13,8 @@ rust-version = "1.77"
 
 [lib]
 name = "epg_monster_studio_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# cdylib hits "export ordinal too large" on Windows GNU. Desktop uses rlib + bin.
+crate-type = ["staticlib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

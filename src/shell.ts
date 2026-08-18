@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { api, type Channel, type Source } from "./api";
+import { editorHtml, mountEditor } from "./editor";
 
 export type NavId =
   | "audit"
@@ -87,6 +88,7 @@ export function mountShell(root: HTMLElement): void {
     search.classList.toggle("hidden", !SEARCH_PAGES.includes(id));
     page.innerHTML = pageHtml(id);
     if (id === "audit") void mountSources(page, showToast);
+    if (id === "editor") void mountEditor(page, showToast);
   };
 
   root.querySelectorAll<HTMLButtonElement>("[data-nav]").forEach((btn) => {
@@ -338,9 +340,7 @@ function pageHtml(id: NavId): string {
           </div>
         </div>`;
     case "editor":
-      return `
-        <h1 class="page-title">Playlist Editor</h1>
-        <p class="page-sub">Curated channels: name, group, logo, tvg-id, tvg-shift. Visible stream + hidden backups.</p>`;
+      return editorHtml();
     case "epg":
       return `
         <h1 class="page-title">EPG Audit</h1>

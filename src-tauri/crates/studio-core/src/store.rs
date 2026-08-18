@@ -5,7 +5,9 @@ use std::path::Path;
 use rusqlite::{params, Connection};
 use thiserror::Error;
 
-use crate::models::{ChannelEntry, PlaylistSource};
+use crate::models::{
+    ChannelEntry, EpgSuggestion, ManagedChannel, NowPlaying, PlaylistSource, StreamVariant,
+};
 use crate::parser::parse_m3u;
 use crate::settings::AppSettings;
 
@@ -444,6 +446,420 @@ impl SqliteStore {
         }
         Ok(())
     }
+
+    pub fn managed_groups(&self) -> Result<Vec<(String, i32)>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT group_title, COUNT(*) FROM managed_channels
+             GROUP BY group_title ORDER BY group_title COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?)))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn list_managed(&self, group: Option<&str>) -> Result<Vec<ManagedChannel>, StoreError> {
+        let mut sql = String::from(
+            "SELECT id, name, group_title, tvg_id, tvg_logo, notes, sort_order,
+                    IFNULL(tvg_shift,0), IFNULL(in_tuner,0), tuner_number
+             FROM managed_channels",
+        );
+        if group.is_some() {
+            sql.push_str(" WHERE group_title = ?1");
+        }
+        sql.push_str(" ORDER BY sort_order, name COLLATE NOCASE");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows: Vec<ManagedChannel> = if let Some(g) = group {
+            stmt.query_map(params![g], read_managed)?
+                .filter_map(|r| r.ok())
+                .collect()
+        } else {
+            stmt.query_map([], read_managed)?
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        for mut ch in rows {
+            ch.variants = self.get_variants(&ch.id)?;
+            ch.has_epg_match = self.is_known_tvg_id(ch.tvg_id.as_deref());
+            out.push(ch);
+        }
+        Ok(out)
+    }
+
+    pub fn get_managed(&self, id: &str) -> Result<Option<ManagedChannel>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, group_title, tvg_id, tvg_logo, notes, sort_order,
+                    IFNULL(tvg_shift,0), IFNULL(in_tuner,0), tuner_number
+             FROM managed_channels WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], read_managed)?;
+        let Some(Ok(mut ch)) = rows.next() else {
+            return Ok(None);
+        };
+        ch.variants = self.get_variants(&ch.id)?;
+        ch.has_epg_match = self.is_known_tvg_id(ch.tvg_id.as_deref());
+        Ok(Some(ch))
+    }
+
+    pub fn upsert_managed(&self, ch: &ManagedChannel) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO managed_channels (id, name, group_title, tvg_id, tvg_logo, notes, sort_order, tvg_shift, in_tuner, tuner_number)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name, group_title=excluded.group_title, tvg_id=excluded.tvg_id,
+                tvg_logo=excluded.tvg_logo, notes=excluded.notes, sort_order=excluded.sort_order,
+                tvg_shift=excluded.tvg_shift, in_tuner=excluded.in_tuner, tuner_number=excluded.tuner_number",
+            params![
+                ch.id,
+                ch.name,
+                ch.group_title,
+                ch.tvg_id,
+                ch.tvg_logo,
+                ch.notes,
+                ch.sort_order,
+                ch.tvg_shift_hours,
+                ch.in_tuner as i32,
+                ch.tuner_number
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_managed(&self) -> Result<(), StoreError> {
+        self.conn.execute_batch("DELETE FROM stream_variants; DELETE FROM managed_channels;")?;
+        Ok(())
+    }
+
+    /// Import a curated m3u. Identity: primary URL, else group+name. Never tvg-id alone.
+    pub fn import_curated(&self, content: &str, replace: bool, label: &str) -> Result<(i32, i32), StoreError> {
+        if replace {
+            self.clear_managed()?;
+        }
+        let entries = parse_m3u(content, "import");
+        let existing = self.list_managed(None)?;
+        let mut by_url = std::collections::HashMap::<String, String>::new();
+        let mut by_gn = std::collections::HashMap::<String, String>::new();
+        for c in &existing {
+            if let Some(u) = c
+                .variants
+                .iter()
+                .find(|v| v.visibility == "visible")
+                .or_else(|| c.variants.first())
+                .map(|v| v.url.trim().to_string())
+                .filter(|u| !u.is_empty())
+            {
+                by_url.entry(u.to_lowercase()).or_insert(c.id.clone());
+            }
+            let key = format!(
+                "{}|{}",
+                c.group_title.trim().to_lowercase(),
+                c.name.trim().to_lowercase()
+            );
+            by_gn.entry(key).or_insert(c.id.clone());
+        }
+        let mut added = 0i32;
+        let mut skipped = 0i32;
+        for (i, e) in entries.iter().enumerate() {
+            let group = if e.group_title.trim().is_empty() {
+                "Ungrouped".to_string()
+            } else {
+                e.group_title.trim().to_string()
+            };
+            let name = if e.name.trim().is_empty() {
+                e.url.trim().to_string()
+            } else {
+                e.name.trim().to_string()
+            };
+            let url = e.url.trim().to_string();
+            let gn = format!("{}|{}", group.to_lowercase(), name.to_lowercase());
+            if (!url.is_empty() && by_url.contains_key(&url.to_lowercase())) || by_gn.contains_key(&gn) {
+                skipped += 1;
+                continue;
+            }
+            let ch = ManagedChannel {
+                id: uuid::Uuid::new_v4().simple().to_string(),
+                name: name.clone(),
+                group_title: group.clone(),
+                tvg_id: e.tvg_id.clone(),
+                tvg_logo: e.tvg_logo.clone(),
+                notes: Some("Imported curated".into()),
+                sort_order: if e.line_no > 0 { e.line_no } else { i as i32 + 1 },
+                tvg_shift_hours: e.tvg_shift_hours,
+                in_tuner: false,
+                tuner_number: None,
+                variants: vec![],
+                has_epg_match: false,
+            };
+            self.upsert_managed(&ch)?;
+            self.upsert_variant(&StreamVariant {
+                id: uuid::Uuid::new_v4().simple().to_string(),
+                managed_channel_id: ch.id.clone(),
+                url,
+                label: Some(label.to_string()),
+                source_entry_id: None,
+                origin_name: None,
+                origin_tvg_id: None,
+                visibility: "visible".into(),
+                priority: 0,
+            })?;
+            by_gn.insert(gn, ch.id);
+            added += 1;
+        }
+        Ok((added, skipped))
+    }
+
+    pub fn delete_managed(&self, id: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM managed_channels WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn rename_managed_group(&self, old: &str, new: &str) -> Result<i32, StoreError> {
+        let old_name = old.trim();
+        if old_name.is_empty() {
+            return Ok(0);
+        }
+        let new_name = if new.trim().is_empty() {
+            "Ungrouped"
+        } else {
+            new.trim()
+        };
+        let n = self.conn.execute(
+            "UPDATE managed_channels SET group_title = ?1 WHERE lower(trim(group_title)) = lower(?2)",
+            params![new_name, old_name],
+        )?;
+        Ok(n as i32)
+    }
+
+    pub fn get_variants(&self, managed_id: &str) -> Result<Vec<StreamVariant>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, managed_channel_id, url, label, source_entry_id, visibility, priority,
+                    origin_name, origin_tvg_id
+             FROM stream_variants WHERE managed_channel_id = ?1 ORDER BY priority, label",
+        )?;
+        let rows = stmt.query_map(params![managed_id], read_variant)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn upsert_variant(&self, v: &StreamVariant) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO stream_variants
+             (id, managed_channel_id, url, label, source_entry_id, visibility, priority, origin_name, origin_tvg_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                url=excluded.url, label=excluded.label, visibility=excluded.visibility,
+                priority=excluded.priority, origin_name=excluded.origin_name, origin_tvg_id=excluded.origin_tvg_id",
+            params![
+                v.id,
+                v.managed_channel_id,
+                v.url,
+                v.label,
+                v.source_entry_id,
+                v.visibility,
+                v.priority,
+                v.origin_name,
+                v.origin_tvg_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_variant(&self, id: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute("DELETE FROM stream_variants WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn apply_variant_order(&self, managed_id: &str, ordered_ids: &[String]) -> Result<(), StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (i, id) in ordered_ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE stream_variants SET priority = ?1, visibility = ?2
+                 WHERE id = ?3 AND managed_channel_id = ?4",
+                params![
+                    i as i32,
+                    if i == 0 { "visible" } else { "hidden_backup" },
+                    id,
+                    managed_id
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn add_stream(
+        &self,
+        managed_id: &str,
+        url: &str,
+        label: Option<&str>,
+    ) -> Result<StreamVariant, StoreError> {
+        let max: i32 = self.conn.query_row(
+            "SELECT IFNULL(MAX(priority), -1) FROM stream_variants WHERE managed_channel_id = ?1",
+            params![managed_id],
+            |row| row.get(0),
+        )?;
+        let v = StreamVariant {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            managed_channel_id: managed_id.to_string(),
+            url: url.trim().to_string(),
+            label: label.map(|s| s.to_string()).filter(|s| !s.is_empty()),
+            source_entry_id: None,
+            origin_name: None,
+            origin_tvg_id: None,
+            visibility: if max < 0 { "visible" } else { "hidden_backup" }.into(),
+            priority: max + 1,
+        };
+        self.upsert_variant(&v)?;
+        Ok(v)
+    }
+
+    pub fn add_from_source_entry(&self, entry_id: &str) -> Result<ManagedChannel, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_id, group_title, name, tvg_id, tvg_name, tvg_logo, url, attrs_json, line_no
+             FROM channel_entries WHERE id = ?1",
+        )?;
+        let entry = read_channels(&mut stmt, params![entry_id])?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StoreError::Io(std::io::Error::other("source row not found")))?;
+        let ch = ManagedChannel {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            name: entry.name.clone(),
+            group_title: "Unassigned".into(),
+            tvg_id: entry.tvg_id.clone(),
+            tvg_logo: entry.tvg_logo.clone(),
+            notes: None,
+            sort_order: entry.line_no,
+            tvg_shift_hours: entry.tvg_shift_hours,
+            in_tuner: false,
+            tuner_number: None,
+            variants: vec![],
+            has_epg_match: false,
+        };
+        self.upsert_managed(&ch)?;
+        let v = StreamVariant {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            managed_channel_id: ch.id.clone(),
+            url: entry.url,
+            label: Some("primary".into()),
+            source_entry_id: Some(entry.id),
+            origin_name: Some(entry.name),
+            origin_tvg_id: entry.tvg_id,
+            visibility: "visible".into(),
+            priority: 0,
+        };
+        self.upsert_variant(&v)?;
+        Ok(self.get_managed(&ch.id)?.unwrap())
+    }
+
+    pub fn is_known_tvg_id(&self, tvg_id: Option<&str>) -> bool {
+        let Some(id) = tvg_id.map(str::trim).filter(|s| !s.is_empty()) else {
+            return false;
+        };
+        self.conn
+            .query_row(
+                "SELECT 1 FROM epg_catalog WHERE tvg_id = ?1 COLLATE NOCASE LIMIT 1",
+                params![id],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    pub fn suggest_tvg(&self, query: &str) -> Result<Vec<EpgSuggestion>, StoreError> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let like = format!("%{q}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT tvg_id, name FROM epg_catalog
+             WHERE tvg_id LIKE ?1 COLLATE NOCASE OR name LIKE ?1 COLLATE NOCASE
+             LIMIT 200",
+        )?;
+        let mut rows: Vec<(String, String)> = stmt
+            .query_map(params![like], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let ql = q.to_lowercase();
+        rows.sort_by(|a, b| {
+            let a_pref = a.0.to_lowercase().starts_with(&ql);
+            let b_pref = b.0.to_lowercase().starts_with(&ql);
+            b_pref.cmp(&a_pref).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+        });
+        Ok(rows
+            .into_iter()
+            .take(40)
+            .map(|(tvg_id, name)| EpgSuggestion {
+                line: format!("{tvg_id}  —  {name}"),
+                tvg_id,
+                name,
+            })
+            .collect())
+    }
+
+    pub fn now_playing(&self, tvg_id: &str, shift_hours: f64) -> Result<Option<NowPlaying>, StoreError> {
+        if tvg_id.trim().is_empty() {
+            return Ok(None);
+        }
+        let shift = time::Duration::seconds((shift_hours * 3600.0) as i64);
+        let effective = time::OffsetDateTime::now_utc() - shift;
+        let t = effective
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let row = self.conn.query_row(
+            "SELECT title, start_utc, stop_utc FROM epg_programmes
+             WHERE tvg_id = ?1 COLLATE NOCASE AND start_utc <= ?2 AND stop_utc > ?2
+             ORDER BY start_utc DESC LIMIT 1",
+            params![tvg_id.trim(), t],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        );
+        match row {
+            Ok((title, start, stop)) => Ok(Some(NowPlaying {
+                title,
+                start_local: start,
+                stop_local: stop,
+            })),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+fn read_managed(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedChannel> {
+    Ok(ManagedChannel {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        group_title: row.get(2)?,
+        tvg_id: row.get(3)?,
+        tvg_logo: row.get(4)?,
+        notes: row.get(5)?,
+        sort_order: row.get(6)?,
+        tvg_shift_hours: row.get(7)?,
+        in_tuner: row.get::<_, i32>(8)? != 0,
+        tuner_number: row.get(9)?,
+        variants: vec![],
+        has_epg_match: false,
+    })
+}
+
+fn read_variant(row: &rusqlite::Row<'_>) -> rusqlite::Result<StreamVariant> {
+    Ok(StreamVariant {
+        id: row.get(0)?,
+        managed_channel_id: row.get(1)?,
+        url: row.get(2)?,
+        label: row.get(3)?,
+        source_entry_id: row.get(4)?,
+        visibility: row.get(5)?,
+        priority: row.get(6)?,
+        origin_name: row.get(7)?,
+        origin_tvg_id: row.get(8)?,
+    })
 }
 
 fn read_channels(
@@ -539,5 +955,49 @@ mod tests {
         store.remove_source(&src.id).unwrap();
         assert!(store.list_sources().unwrap().is_empty());
         assert!(store.search_sources("CNN").unwrap().is_empty());
+    }
+
+    #[test]
+    fn managed_channel_and_backup_order() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        let ch = ManagedChannel {
+            id: "c1".into(),
+            name: "CNN".into(),
+            group_title: "NEWS".into(),
+            tvg_id: Some("CNN.us".into()),
+            tvg_logo: None,
+            notes: None,
+            sort_order: 0,
+            tvg_shift_hours: 0.0,
+            in_tuner: false,
+            tuner_number: None,
+            variants: vec![],
+            has_epg_match: false,
+        };
+        store.upsert_managed(&ch).unwrap();
+        let a = store.add_stream("c1", "http://a", Some("A")).unwrap();
+        let b = store.add_stream("c1", "http://b", Some("B")).unwrap();
+        assert_eq!(a.visibility, "visible");
+        assert_eq!(b.visibility, "hidden_backup");
+        store.apply_variant_order("c1", &[b.id.clone(), a.id.clone()]).unwrap();
+        let loaded = store.get_managed("c1").unwrap().unwrap();
+        assert_eq!(loaded.variants[0].url, "http://b");
+        assert_eq!(loaded.variants[0].visibility, "visible");
+        assert_eq!(store.rename_managed_group("NEWS", "News HD").unwrap(), 1);
+        assert_eq!(store.managed_groups().unwrap()[0].0, "News HD");
+    }
+
+    #[test]
+    fn import_curated_skips_same_url() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        let m3u = "#EXTM3U\n#EXTINF:-1 group-title=\"News\",CNN\nhttp://x/cnn\n";
+        let (a, s) = store.import_curated(m3u, true, "file").unwrap();
+        assert_eq!(a, 1);
+        assert_eq!(s, 0);
+        let (a2, s2) = store.import_curated(m3u, false, "file").unwrap();
+        assert_eq!(a2, 0);
+        assert_eq!(s2, 1);
     }
 }

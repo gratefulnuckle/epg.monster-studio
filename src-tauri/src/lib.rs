@@ -4,9 +4,13 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use studio_core::models::{ChannelEntry, PlaylistSource};
+use studio_core::models::{
+    ChannelEntry, EpgSuggestion, ManagedChannel, NowPlaying, PlaylistSource, StreamVariant,
+};
 use studio_core::paths::{app_data_directory, database_path};
+use studio_core::export::{export_all, export_visible_only};
 use studio_core::player;
+use studio_core::settings::AppSettings;
 use studio_core::store::SqliteStore;
 use studio_core::tools::detect_bundled;
 use studio_core::{DISPLAY_NAME, VERSION};
@@ -279,6 +283,189 @@ fn play_url(
     player::play(&url, &settings, headers.as_ref(), &app_root(&app))
 }
 
+#[tauri::command]
+fn list_managed_groups(state: tauri::State<AppState>) -> Result<Vec<GroupDto>, String> {
+    Ok(lock_store(&state)?
+        .managed_groups()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(title, count)| GroupDto { title, count })
+        .collect())
+}
+
+#[tauri::command]
+fn list_managed(
+    state: tauri::State<AppState>,
+    group: Option<String>,
+) -> Result<Vec<ManagedChannel>, String> {
+    lock_store(&state)?
+        .list_managed(group.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_managed(state: tauri::State<AppState>, id: String) -> Result<Option<ManagedChannel>, String> {
+    lock_store(&state)?.get_managed(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_managed(state: tauri::State<AppState>, channel: ManagedChannel) -> Result<(), String> {
+    lock_store(&state)?
+        .upsert_managed(&channel)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_managed(state: tauri::State<AppState>, id: String) -> Result<(), String> {
+    lock_store(&state)?.delete_managed(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rename_managed_group(
+    state: tauri::State<AppState>,
+    old_name: String,
+    new_name: String,
+) -> Result<i32, String> {
+    lock_store(&state)?
+        .rename_managed_group(&old_name, &new_name)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_stream(
+    state: tauri::State<AppState>,
+    managed_id: String,
+    url: String,
+    label: Option<String>,
+) -> Result<StreamVariant, String> {
+    lock_store(&state)?
+        .add_stream(&managed_id, &url, label.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_variant(state: tauri::State<AppState>, id: String) -> Result<(), String> {
+    lock_store(&state)?.delete_variant(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn move_variant(
+    state: tauri::State<AppState>,
+    managed_id: String,
+    variant_id: String,
+    delta: i32,
+) -> Result<(), String> {
+    let store = lock_store(&state)?;
+    let vars = store.get_variants(&managed_id).map_err(|e| e.to_string())?;
+    let mut ids: Vec<String> = vars.into_iter().map(|v| v.id).collect();
+    let i = ids.iter().position(|id| id == &variant_id).ok_or("stream not found")?;
+    let j = i as i32 + delta;
+    if j < 0 || j as usize >= ids.len() {
+        return Ok(());
+    }
+    ids.swap(i, j as usize);
+    store
+        .apply_variant_order(&managed_id, &ids)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn suggest_tvg(state: tauri::State<AppState>, query: String) -> Result<Vec<EpgSuggestion>, String> {
+    lock_store(&state)?.suggest_tvg(&query).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn now_playing(
+    state: tauri::State<AppState>,
+    tvg_id: String,
+    shift_hours: f64,
+) -> Result<Option<NowPlaying>, String> {
+    lock_store(&state)?
+        .now_playing(&tvg_id, shift_hours)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn is_known_tvg(state: tauri::State<AppState>, tvg_id: String) -> Result<bool, String> {
+    Ok(lock_store(&state)?.is_known_tvg_id(Some(&tvg_id)))
+}
+
+#[tauri::command]
+fn add_from_source(state: tauri::State<AppState>, entry_id: String) -> Result<ManagedChannel, String> {
+    lock_store(&state)?
+        .add_from_source_entry(&entry_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn import_curated(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    replace: bool,
+) -> Result<String, String> {
+    let picked = tauri_plugin_dialog::DialogExt::dialog(&app)
+        .file()
+        .add_filter("Playlists", &["m3u", "m3u8"])
+        .blocking_pick_file();
+    let Some(file) = picked else {
+        return Ok("cancelled".into());
+    };
+    let path = file.into_path().map_err(|e| e.to_string())?;
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let label = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("curated");
+    let (added, skipped) = lock_store(&state)?
+        .import_curated(&content, replace, label)
+        .map_err(|e| e.to_string())?;
+    Ok(format!("Imported {added}, skipped {skipped} already present."))
+}
+
+#[tauri::command]
+fn export_managed(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    include_backups: bool,
+) -> Result<String, String> {
+    let picked = tauri_plugin_dialog::DialogExt::dialog(&app)
+        .file()
+        .add_filter("M3U8", &["m3u8", "m3u"])
+        .set_file_name("playlist.m3u8")
+        .blocking_save_file();
+    let Some(file) = picked else {
+        return Ok("cancelled".into());
+    };
+    let path = file.into_path().map_err(|e| e.to_string())?;
+    let channels = lock_store(&state)?
+        .list_managed(None)
+        .map_err(|e| e.to_string())?;
+    let body = if include_backups {
+        export_all(&channels)
+    } else {
+        export_visible_only(&channels)
+    };
+    std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    Ok(format!("Wrote {}", path.display()))
+}
+
+#[tauri::command]
+fn clear_managed(state: tauri::State<AppState>) -> Result<(), String> {
+    lock_store(&state)?.clear_managed().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn load_settings(state: tauri::State<AppState>) -> Result<AppSettings, String> {
+    lock_store(&state)?.load_settings().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_settings(state: tauri::State<AppState>, settings: AppSettings) -> Result<(), String> {
+    lock_store(&state)?
+        .save_settings(&settings)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let db = database_path();
@@ -303,6 +490,24 @@ pub fn run() {
             pick_source_file,
             add_source_url,
             play_url,
+            list_managed_groups,
+            list_managed,
+            get_managed,
+            save_managed,
+            delete_managed,
+            rename_managed_group,
+            add_stream,
+            delete_variant,
+            move_variant,
+            suggest_tvg,
+            now_playing,
+            is_known_tvg,
+            add_from_source,
+            import_curated,
+            export_managed,
+            clear_managed,
+            load_settings,
+            save_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running epg.monster studio");

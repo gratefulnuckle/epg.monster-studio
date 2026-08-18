@@ -40,6 +40,53 @@ impl Default for ChannelEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamVariant {
+    pub id: String,
+    pub managed_channel_id: String,
+    pub url: String,
+    pub label: Option<String>,
+    pub source_entry_id: Option<String>,
+    pub origin_name: Option<String>,
+    pub origin_tvg_id: Option<String>,
+    pub visibility: String,
+    pub priority: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedChannel {
+    pub id: String,
+    pub name: String,
+    pub group_title: String,
+    pub tvg_id: Option<String>,
+    pub tvg_logo: Option<String>,
+    pub notes: Option<String>,
+    pub sort_order: i32,
+    pub tvg_shift_hours: f64,
+    pub in_tuner: bool,
+    pub tuner_number: Option<i32>,
+    pub variants: Vec<StreamVariant>,
+    pub has_epg_match: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EpgSuggestion {
+    pub tvg_id: String,
+    pub name: String,
+    pub line: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NowPlaying {
+    pub title: String,
+    pub start_local: String,
+    pub stop_local: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct PlaylistSource {
     pub id: String,
