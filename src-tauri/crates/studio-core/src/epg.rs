@@ -313,7 +313,7 @@ pub fn google_images_transparent_url(query: &str) -> String {
     )
 }
 
-fn urlencoding_minimal(s: &str) -> String {
+pub(crate) fn urlencoding_minimal(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {

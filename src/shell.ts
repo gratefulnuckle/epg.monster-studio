@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { api, type Channel, type Source } from "./api";
 import { editorHtml, mountEditor } from "./editor";
 import { epgHtml, mountEpg } from "./epg";
+import { logoHtml, mountLogo } from "./logo";
 
 export type NavId =
   | "audit"
@@ -91,6 +92,7 @@ export function mountShell(root: HTMLElement): void {
     if (id === "audit") void mountSources(page, showToast);
     if (id === "editor") void mountEditor(page, showToast);
     if (id === "epg") void mountEpg(page, showToast);
+    if (id === "logoaudit") void mountLogo(page, showToast);
   };
 
   root.querySelectorAll<HTMLButtonElement>("[data-nav]").forEach((btn) => {
@@ -346,9 +348,7 @@ function pageHtml(id: NavId): string {
     case "epg":
       return epgHtml();
     case "logoaudit":
-      return `
-        <h1 class="page-title">Logo Audit</h1>
-        <p class="page-sub">Find missing, invalid, or broken logos. Save Logos downloads a local PNG pack.</p>`;
+      return logoHtml();
     case "autoaudit":
       return `
         <h1 class="page-title">Stream Audit</h1>

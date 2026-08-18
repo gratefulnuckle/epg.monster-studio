@@ -9,6 +9,7 @@ use studio_core::models::{
 };
 use studio_core::paths::{app_data_directory, database_path};
 use studio_core::epg;
+use studio_core::logo;
 use studio_core::export::{export_all, export_visible_only};
 use studio_core::models::{CatalogEntry, EpgAuditRow};
 use studio_core::player;
@@ -611,6 +612,138 @@ fn epg_browse_catalog(state: tauri::State<AppState>) -> Result<Vec<CatalogEntry>
 }
 
 #[tauri::command]
+fn logo_scan(state: tauri::State<AppState>, probe: bool) -> Result<Vec<logo::LogoIssue>, String> {
+    let channels = {
+        let store = lock_store(&state)?;
+        store.list_managed(None).map_err(|e| e.to_string())?
+    };
+    let mut out = Vec::new();
+    for ch in channels {
+        let mut issue = logo::classify_channel(&ch);
+        if probe && issue.issue.is_empty() {
+            if let Some(url) = ch.tvg_logo.as_deref() {
+                let check = logo::probe_url(url);
+                if !check.is_ok() {
+                    issue.issue = check
+                        .issue
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "broken".into());
+                    issue.reason = check.reason;
+                }
+            }
+        }
+        out.push(issue);
+    }
+    logo::sort_issues(&mut out);
+    Ok(out)
+}
+
+fn reject_logo_url(url: &str) -> Result<(), String> {
+    let check = logo::classify_url(url);
+    if !check.is_ok() {
+        return Err(if check.reason.is_empty() {
+            "Logo URL must be http(s)".into()
+        } else {
+            check.reason
+        });
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn logo_set(
+    state: tauri::State<AppState>,
+    managed_id: String,
+    url: Option<String>,
+) -> Result<(), String> {
+    let trimmed = url.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if let Some(u) = trimmed {
+        reject_logo_url(u)?;
+    }
+    let store = lock_store(&state)?;
+    let Some(mut ch) = store.get_managed(&managed_id).map_err(|e| e.to_string())? else {
+        return Err("channel not found".into());
+    };
+    ch.tvg_logo = trimmed.map(|s| s.to_string());
+    store.upsert_managed(&ch).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn logo_batch_set(
+    state: tauri::State<AppState>,
+    ids: Vec<String>,
+    url: String,
+) -> Result<i32, String> {
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return Err("Paste a logo URL first".into());
+    }
+    reject_logo_url(&url)?;
+    let store = lock_store(&state)?;
+    let mut n = 0;
+    for id in ids {
+        if let Some(mut ch) = store.get_managed(&id).map_err(|e| e.to_string())? {
+            ch.tvg_logo = Some(url.clone());
+            store.upsert_managed(&ch).map_err(|e| e.to_string())?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+#[tauri::command]
+fn logo_default_dir() -> String {
+    logo::default_logo_dir().to_string_lossy().into_owned()
+}
+
+#[tauri::command]
+fn logo_save_plan(
+    state: tauri::State<AppState>,
+    root: Option<String>,
+) -> Result<(String, Vec<logo::LogoSaveItem>), String> {
+    let store = lock_store(&state)?;
+    let settings = store.load_settings().map_err(|e| e.to_string())?;
+    let dir = root
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            if settings.logo_save_directory.trim().is_empty() {
+                logo::default_logo_dir()
+            } else {
+                std::path::PathBuf::from(&settings.logo_save_directory)
+            }
+        });
+    let channels = store.list_managed(None).map_err(|e| e.to_string())?;
+    Ok((dir.to_string_lossy().into_owned(), logo::plan_save(&channels, &dir)))
+}
+
+#[tauri::command]
+fn logo_save_one(
+    state: tauri::State<AppState>,
+    mut item: logo::LogoSaveItem,
+) -> Result<logo::LogoSaveItem, String> {
+    let settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
+    logo::save_one(&mut item, &settings.ffmpeg_path);
+    Ok(item)
+}
+
+#[tauri::command]
+fn logo_save_tracker(root: String, items: Vec<logo::LogoSaveItem>) -> Result<(), String> {
+    if root.trim().is_empty() {
+        return Err("Pick a save folder first.".into());
+    }
+    logo::save_tracker(std::path::Path::new(root.trim()), &items);
+    Ok(())
+}
+
+#[tauri::command]
+fn logo_search_urls(name: String) -> (String, String, String) {
+    logo::search_urls(&name)
+}
+
+#[tauri::command]
 fn epg_search_images_url(name: String) -> String {
     let q = if name.trim().is_empty() {
         "channel logo".into()
@@ -671,6 +804,14 @@ pub fn run() {
             epg_auto_match,
             epg_browse_catalog,
             epg_search_images_url,
+            logo_scan,
+            logo_set,
+            logo_batch_set,
+            logo_default_dir,
+            logo_save_plan,
+            logo_save_one,
+            logo_save_tracker,
+            logo_search_urls,
         ])
         .run(tauri::generate_context!())
         .expect("error while running epg.monster studio");

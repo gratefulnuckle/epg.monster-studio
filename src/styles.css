@@ -552,11 +552,22 @@ input.tvg-ok {
 }
 
 .status-pill {
-  background: #2a2a36;
+  background: #3a2a2a;
   border-radius: 4px;
   padding: 2px 8px;
   font-size: 11px;
   font-weight: 600;
+  color: #ffab91;
+}
+
+.lg-thumb {
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  background: #1a1a22;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
 }
 
 .stream-row {

@@ -2,6 +2,7 @@
 
 pub mod epg;
 pub mod export;
+pub mod logo;
 pub mod info;
 pub mod models;
 pub mod parser;
