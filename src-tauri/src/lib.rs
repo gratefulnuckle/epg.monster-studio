@@ -1876,6 +1876,7 @@ fn epg_search_images_url(name: String) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    studio_core::paths::configure_from_current_exe();
     let db = database_path();
     let store = SqliteStore::open(&db).expect("open studio database");
     let audit_store = audit::ProcessStore::open(None).expect("open auditprocess database");

@@ -7,12 +7,30 @@ SQLite workspace, FTS, settings, caches, and legacy folder copy. C#: `SqliteStor
 ## Requirements
 
 ### Requirement: AppData location
-The system SHALL use `%LocalAppData%\epg.monster-studio\` as the data root (product id `epg.monster-studio`).
+The system SHALL pick a data root from the install folder, not from a v1 tree.
 
-#### Scenario: Legacy copy
-- GIVEN `%LocalAppData%\iptv-studio\` exists and the new folder has no database
-- WHEN the remake first launches
-- THEN the legacy folder is copied into `epg.monster-studio` before open
+1. Let `app_dir` be the directory that contains the executable (on macOS, the directory that contains the `.app` bundle; for an AppImage, the AppImage's parent directory).
+2. If `app_dir` is writable by the current user, data is `{app_dir}/data`.
+3. Otherwise data is the OS user data folder: Windows `%LocalAppData%\epg.monster-studio`, Linux `$XDG_DATA_HOME/epg.monster-studio` or `~/.local/share/epg.monster-studio`, macOS `~/Library/Application Support/epg.monster-studio`.
+
+That folder holds `epg.monster-studio.db`, `auditprocess.db`, `logs/`, `logo/`, `offline-slates/`, `cache/`, `tool-cache/`. Schema stays C#-compatible so a **manual** copy of an old DB still opens.
+
+#### Scenario: Portable install
+- GIVEN the directory that contains the executable is writable
+- WHEN the app resolves its data folder
+- THEN that folder is `{app_dir}/data`
+- AND the app does not search `%LocalAppData%\epg.monster-studio` or `iptv-studio`
+
+#### Scenario: System install
+- GIVEN the directory that contains the executable is not writable
+- WHEN the app resolves its data folder
+- THEN that folder is the OS user data folder named `epg.monster-studio`
+
+#### Scenario: No legacy copy
+- GIVEN `%LocalAppData%\iptv-studio\` exists and the chosen data folder has no database
+- WHEN the app first launches
+- THEN the legacy folder is left untouched
+- AND `iptv-studio.db` is not renamed or opened as the studio database
 
 ### Requirement: Main database
 The system SHALL open `epg.monster-studio.db` with `PRAGMA journal_mode=WAL` and `foreign_keys=ON`, creating the C# tables if missing and applying the same `EnsureColumn` migrations.

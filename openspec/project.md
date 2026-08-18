@@ -36,7 +36,7 @@ Do not introduce React-admin dashboards, Tailwind “redesigns,” or a new info
 2. **Copy is verbatim.** Button text, headers, placeholders, toasts, empty states, About strings — same characters, including the ellipsis character `…` where the source uses it.
 3. **Tokens are exact.** See visual-parity spec. `#0C0C10` chrome, `#16161E` tiles, `#32CD32` match green, `#E57373` broken logo, `#FF6D00` issue orange.
 4. **Do not simplify.** If Windows has Play + Info + up/down + Remove on a backup row, the remake has all five. Linux Avalonia shortcuts are **not** the target.
-5. **Same data.** Open `%LocalAppData%\epg.monster-studio\` (legacy `%LocalAppData%\iptv-studio\` copied on first launch). Same `epg.monster-studio.db` and `auditprocess.db`.
+5. **Same schema, v2 location.** Writable app folder → `{app}/data`. Otherwise OS user data (`epg.monster-studio`). Same `epg.monster-studio.db` / `auditprocess.db` schema as C#. Do **not** auto-copy `%LocalAppData%\epg.monster-studio` or `iptv-studio`.
 6. **Same privacy.** Never log or upload access keys (`epgm_…`) or provider stream URLs. Crash reports redact them.
 7. **Serial probes.** ffmpeg audit concurrency is **1**. Default delay **6000 ms**, timeout **15000 ms**.
 8. **IPTV tuner on by default** for new installs; Plex / Jellyfin / Emby off until Settings. Start still required on TV Tuner.

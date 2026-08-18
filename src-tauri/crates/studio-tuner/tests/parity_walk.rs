@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use studio_core::hdhr;
-use studio_core::paths::database_path;
+use studio_core::paths::{database_file_in, user_data_directory};
 use studio_core::settings::TunerServerProfile;
 use studio_core::store::SqliteStore;
 use studio_tuner::host::{TunerHost, TunerSnapshot};
@@ -48,7 +48,9 @@ fn start_kind(kind: &str, channels: &[studio_core::ManagedChannel]) -> (Arc<Tune
 
 #[test]
 fn walk_real_appdata_db_and_self_test_four_tuners() {
-    let db = database_path();
+    // Live C# / v1 DB lives in the OS user folder. Portable `{app}/data` is a
+    // different tree and must not be auto-filled from that folder.
+    let db = database_file_in(&user_data_directory());
     if !db.exists() {
         eprintln!("skip parity walk: no AppData DB at {}", db.display());
         return;
