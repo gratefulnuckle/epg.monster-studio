@@ -1111,8 +1111,22 @@ fn fetch_epg_catalog(state: tauri::State<AppState>, url: Option<String>) -> Resu
     std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
     let mut all_ch = Vec::new();
     let mut all_prog = Vec::new();
+    let mut etag = None;
+    let mut last_mod = None;
     for u in &urls {
-        let bytes = epg::fetch_xmltv(u)?;
+        let got = epg::fetch_xmltv_conditional(u, None, None)?;
+        let epg::FetchXmltv::Body {
+            bytes,
+            etag: e,
+            last_modified: lm,
+        } = got
+        else {
+            continue;
+        };
+        if etag.is_none() {
+            etag = e;
+            last_mod = lm;
+        }
         let host = u
             .split("://")
             .nth(1)
@@ -1132,6 +1146,9 @@ fn fetch_epg_catalog(state: tauri::State<AppState>, url: Option<String>) -> Resu
     all_ch.retain(|c| seen.insert(c.tvg_id.to_ascii_lowercase()));
     store.replace_epg_catalog(&all_ch).map_err(|e| e.to_string())?;
     store.replace_programmes(&all_prog).map_err(|e| e.to_string())?;
+    store
+        .touch_epg_cache_meta(true, true, etag.as_deref(), last_mod.as_deref())
+        .map_err(|e| e.to_string())?;
     Ok(format!(
         "{} catalog ids · {} programmes indexed",
         all_ch.len(),
@@ -1152,10 +1169,63 @@ fn rebuild_now_playing(state: tauri::State<AppState>) -> Result<String, String> 
             }
         }
     }
-    lock_store(&state)?
-        .replace_programmes(&all)
+    let store = lock_store(&state)?;
+    store.replace_programmes(&all).map_err(|e| e.to_string())?;
+    store
+        .touch_epg_cache_meta(false, true, None, None)
         .map_err(|e| e.to_string())?;
     Ok(format!("Reindexed {} programmes from cache", all.len()))
+}
+
+fn cache_has_xml() -> bool {
+    let cache = app_data_directory().join("cache");
+    let Ok(rd) = std::fs::read_dir(cache) else {
+        return false;
+    };
+    rd.flatten()
+        .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("xml"))
+}
+
+#[tauri::command]
+fn epg_refresh_schedule(
+    state: tauri::State<AppState>,
+    only_if_stale: bool,
+) -> Result<String, String> {
+    let store = lock_store(&state)?;
+    let catalog = store.catalog_count().unwrap_or(0);
+    let programmes = store.programme_count().unwrap_or(0);
+    let usable = catalog > 0 && programmes > 0 && cache_has_xml();
+    let meta = store.load_epg_cache_meta();
+    if only_if_stale && usable && meta.index_is_fresh(epg::REFRESH_INTERVAL_SECS) {
+        return Ok("skipped".into());
+    }
+    if !usable {
+        drop(store);
+        fetch_epg_catalog(state, None)?;
+        return Ok("downloaded".into());
+    }
+    let settings = store.load_settings().map_err(|e| e.to_string())?;
+    let url = epg::resolve_xml_urls(&settings)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| epg::DEFAULT_XML_URL.into());
+    let etag = meta.etag.clone();
+    let last_mod = meta.last_modified.clone();
+    drop(store);
+    match epg::fetch_xmltv_conditional(&url, etag.as_deref(), last_mod.as_deref()) {
+        Ok(epg::FetchXmltv::NotModified) => {
+            rebuild_now_playing(state)?;
+            Ok("reindexed".into())
+        }
+        Ok(epg::FetchXmltv::Body { .. }) => {
+            fetch_epg_catalog(state, None)?;
+            Ok("downloaded".into())
+        }
+        Err(_) => {
+            rebuild_now_playing(state)?;
+            Ok("reindexed".into())
+        }
+    }
 }
 
 #[tauri::command]
@@ -1771,6 +1841,7 @@ pub fn run() {
             epg_catalog_count,
             epg_guide_url,
             fetch_epg_catalog,
+            epg_refresh_schedule,
             rebuild_now_playing,
             epg_audit,
             epg_apply,

@@ -9,6 +9,7 @@ import { auditHtml, mountAudit } from "./audit";
 import { outputHtml, mountOutput } from "./output";
 import { tunerHtml, mountTuner } from "./tuner";
 import { settingsHtml, mountSettings } from "./settings";
+import { bindVirtualList, type VirtualList } from "./virtual";
 
 export type NavId =
   | "audit"
@@ -32,7 +33,7 @@ const NAV: { id: NavId; label: string; icon: string }[] = [
 
 const SEARCH_PAGES: NavId[] = ["audit", "editor", "output"];
 
-export function mountShell(root: HTMLElement): void {
+export function mountShell(root: HTMLElement): { toast: (s: string) => void } {
   root.innerHTML = `
     <div class="shell">
       <header class="titlebar">
@@ -156,6 +157,7 @@ export function mountShell(root: HTMLElement): void {
     const id = ev.payload as NavId;
     if (id) render(id);
   });
+  return { toast: showToast };
 }
 
 function wireCaptionButtons(root: HTMLElement): void {
@@ -200,7 +202,7 @@ function wireCaptionButtons(root: HTMLElement): void {
 async function mountSources(page: HTMLElement, toast: (s: string) => void): Promise<void> {
   const tabs = page.querySelector("#source-tabs")!;
   const groupsEl = page.querySelector("#source-groups")!;
-  const channelsEl = page.querySelector("#source-channels")!;
+  const channelsEl = page.querySelector<HTMLElement>("#source-channels")!;
   const empty = page.querySelector<HTMLElement>("#source-empty")!;
   const workspace = page.querySelector<HTMLElement>("#source-workspace")!;
   const urlDlg = page.querySelector<HTMLElement>("#url-dlg")!;
@@ -210,6 +212,7 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
   let searching = false;
   let hasManaged = false;
   let lastChans: Channel[] = [];
+  let chanVirt: VirtualList<Channel> | null = null;
 
   const paintTabs = () => {
     tabs.innerHTML = "";
@@ -270,11 +273,19 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
     searching = isSearch;
     lastChans = chans;
     const addCol = hasManaged ? "" : " no-add";
-    channelsEl.innerHTML = `<div class="chan-head${addCol}"><span>Play</span>${hasManaged ? "<span>Add</span>" : ""}<span>Name</span><span>tvg-id</span><span>URL</span></div>`;
-    for (const c of chans) {
-      const row = document.createElement("div");
-      row.className = "chan-row" + addCol;
-      row.innerHTML = `
+    chanVirt?.destroy();
+    channelsEl.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "chan-head" + addCol;
+    head.innerHTML = `<span>Play</span>${hasManaged ? "<span>Add</span>" : ""}<span>Name</span><span>tvg-id</span><span>URL</span>`;
+    chanVirt = bindVirtualList({
+      scroller: channelsEl,
+      rowHeight: 48,
+      header: head,
+      renderRow: (c) => {
+        const row = document.createElement("div");
+        row.className = "chan-row" + addCol;
+        row.innerHTML = `
         <button class="play" data-url="${escapeAttr(c.url)}" data-sid="${escapeAttr(c.sourceId)}" title="Play stream">&#xE768;</button>
         ${hasManaged ? `<button class="add-pl" data-id="${escapeAttr(c.id)}" title="Add to managed playlist">&#xE710;</button>` : ""}
         <div class="chan-meta">
@@ -284,8 +295,10 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
         <span class="copy" data-copy="${escapeAttr(c.tvgId ?? "")}">${escapeHtml(c.tvgId ?? "")}</span>
         <span class="copy url" data-copy="${escapeAttr(c.url)}" title="${escapeAttr(c.url)}">${escapeHtml(truncate(c.url, 64))}</span>
       `;
-      channelsEl.appendChild(row);
-    }
+        return row;
+      },
+    });
+    chanVirt.setItems(chans);
   };
 
   const reload = async () => {

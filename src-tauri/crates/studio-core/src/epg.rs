@@ -15,6 +15,38 @@ use crate::settings::AppSettings;
 use crate::USER_AGENT;
 
 pub const DEFAULT_XML_URL: &str = "https://epg.monster/epg.xml";
+pub const REFRESH_INTERVAL_SECS: i64 = 30 * 60;
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct EpgCacheMeta {
+    pub last_fetch_at: Option<String>,
+    pub last_index_at: Option<String>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+impl EpgCacheMeta {
+    pub fn index_is_fresh(&self, max_age_secs: i64) -> bool {
+        let Some(raw) = self.last_index_at.as_deref() else {
+            return false;
+        };
+        let Ok(t) = OffsetDateTime::parse(raw, &Rfc3339) else {
+            return false;
+        };
+        let age = OffsetDateTime::now_utc() - t;
+        age < Duration::seconds(max_age_secs)
+    }
+}
+
+pub enum FetchXmltv {
+    NotModified,
+    Body {
+        bytes: Vec<u8>,
+        etag: Option<String>,
+        last_modified: Option<String>,
+    },
+}
 
 pub fn is_epgshare_url(url: &str) -> bool {
     let u = url.to_ascii_lowercase();
@@ -481,15 +513,44 @@ pub fn should_auto_apply(row: &EpgAuditRow, min_score: f64, require_unique: bool
 }
 
 pub fn fetch_xmltv(url: &str) -> Result<Vec<u8>, String> {
-    let resp = ureq::get(url)
-        .set("User-Agent", USER_AGENT)
-        .call()
-        .map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
-    resp.into_reader()
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    Ok(bytes)
+    match fetch_xmltv_conditional(url, None, None)? {
+        FetchXmltv::Body { bytes, .. } => Ok(bytes),
+        FetchXmltv::NotModified => Err("not modified".into()),
+    }
+}
+
+pub fn fetch_xmltv_conditional(
+    url: &str,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+) -> Result<FetchXmltv, String> {
+    let mut req = ureq::get(url).set("User-Agent", USER_AGENT);
+    if let Some(e) = etag.map(str::trim).filter(|s| !s.is_empty()) {
+        req = req.set("If-None-Match", e);
+    }
+    if let Some(lm) = last_modified.map(str::trim).filter(|s| !s.is_empty()) {
+        req = req.set("If-Modified-Since", lm);
+    }
+    match req.call() {
+        Err(ureq::Error::Status(304, _)) => Ok(FetchXmltv::NotModified),
+        Err(e) => Err(e.to_string()),
+        Ok(resp) => {
+            if resp.status() == 304 {
+                return Ok(FetchXmltv::NotModified);
+            }
+            let etag = resp.header("etag").map(|s| s.to_string());
+            let last_modified = resp.header("last-modified").map(|s| s.to_string());
+            let mut bytes = Vec::new();
+            resp.into_reader()
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            Ok(FetchXmltv::Body {
+                bytes,
+                etag,
+                last_modified,
+            })
+        }
+    }
 }
 
 pub fn section_display(section: &str) -> String {
@@ -594,6 +655,20 @@ mod tests {
         let t = try_parse_xmltv_time("20240101120000 +0000").unwrap();
         assert_eq!(t.year(), 2024);
         assert_eq!(t.hour(), 12);
+    }
+
+    #[test]
+    fn cache_meta_freshness() {
+        let mut m = EpgCacheMeta::default();
+        assert!(!m.index_is_fresh(REFRESH_INTERVAL_SECS));
+        m.last_index_at = Some(OffsetDateTime::now_utc().format(&Rfc3339).unwrap());
+        assert!(m.index_is_fresh(REFRESH_INTERVAL_SECS));
+        m.last_index_at = Some(
+            (OffsetDateTime::now_utc() - Duration::minutes(31))
+                .format(&Rfc3339)
+                .unwrap(),
+        );
+        assert!(!m.index_is_fresh(REFRESH_INTERVAL_SECS));
     }
 
     #[test]

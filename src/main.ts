@@ -3,6 +3,7 @@ import "./styles.css";
 import { mountShell } from "./shell";
 import { installCrashHooks, installHideOnMinimize, showPendingCrash, startHeartbeat } from "./crash";
 import { runSplash } from "./splash";
+import { startEpgSchedule } from "./epg-schedule";
 
 installCrashHooks();
 
@@ -17,6 +18,7 @@ try {
   /* stay on splash size if promote fails */
 }
 installHideOnMinimize();
-mountShell(app);
+const shell = mountShell(app);
 startHeartbeat();
 void showPendingCrash(app);
+startEpgSchedule(shell.toast);

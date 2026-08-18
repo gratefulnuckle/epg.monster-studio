@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { api } from "./api";
+import { bindVirtualList, type VirtualList } from "./virtual";
 
 export type Variant = {
   id: string;
@@ -143,6 +144,7 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
   let group = "";
   let selected: Managed | null = null;
   let draft = false;
+  let chanVirt: VirtualList<Managed> | null = null;
 
   const reload = async () => {
     const groups = await invoke<{ title: string; count: number }[]>("list_managed_groups");
@@ -178,14 +180,22 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
   };
 
   const loadChannels = async () => {
-    const list = page.querySelector("#ed-channels")!;
-    list.innerHTML = "";
-    if (!group) return;
+    const list = page.querySelector<HTMLElement>("#ed-channels")!;
+    if (!group) {
+      chanVirt?.destroy();
+      chanVirt = null;
+      list.innerHTML = "";
+      return;
+    }
     const chans = await invoke<Managed[]>("list_managed", { group });
-    for (const c of chans) {
-      const row = document.createElement("button");
-      row.className = "chan-pick" + (selected?.id === c.id ? " active" : "");
-      row.innerHTML = `
+    if (!chanVirt) {
+      chanVirt = bindVirtualList({
+        scroller: list,
+        rowHeight: 52,
+        renderRow: (c) => {
+          const row = document.createElement("button");
+          row.className = "chan-pick" + (selected?.id === c.id ? " active" : "");
+          row.innerHTML = `
         <span class="logo-slot">
           ${c.tvgLogo ? `<img src="${esc(c.tvgLogo)}" alt="" />` : `<span class="logo-broken">&#xE7BA;</span>`}
           ${c.hasEpgMatch ? `<span class="tvg-check">✓</span>` : ""}
@@ -194,16 +204,19 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
           <span class="chan-name">${esc(c.name)}</span>
           <span class="chan-sub">${esc(c.tvgId ?? "")}</span>
         </span>`;
-      const img = row.querySelector("img");
-      img?.addEventListener("error", () => {
-        const slot = row.querySelector(".logo-slot");
-        if (!slot) return;
-        const check = slot.querySelector(".tvg-check")?.outerHTML ?? "";
-        slot.innerHTML = `<span class="logo-broken">&#xE7BA;</span>${check}`;
+          const img = row.querySelector("img");
+          img?.addEventListener("error", () => {
+            const slot = row.querySelector(".logo-slot");
+            if (!slot) return;
+            const check = slot.querySelector(".tvg-check")?.outerHTML ?? "";
+            slot.innerHTML = `<span class="logo-broken">&#xE7BA;</span>${check}`;
+          });
+          row.addEventListener("click", () => void select(c.id));
+          return row;
+        },
       });
-      row.addEventListener("click", () => void select(c.id));
-      list.appendChild(row);
     }
+    chanVirt.setItems(chans);
   };
 
   const select = async (id: string) => {

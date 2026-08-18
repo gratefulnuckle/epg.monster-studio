@@ -232,6 +232,52 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn load_epg_cache_meta(&self) -> crate::epg::EpgCacheMeta {
+        let value: Result<String, _> = self.conn.query_row(
+            "SELECT value FROM settings WHERE key = 'epg_cache'",
+            [],
+            |row| row.get(0),
+        );
+        match value {
+            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+            _ => crate::epg::EpgCacheMeta::default(),
+        }
+    }
+
+    pub fn save_epg_cache_meta(&self, meta: &crate::epg::EpgCacheMeta) -> Result<(), StoreError> {
+        let json = serde_json::to_string(meta)?;
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('epg_cache', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![json],
+        )?;
+        Ok(())
+    }
+
+    pub fn touch_epg_cache_meta(
+        &self,
+        fetched: bool,
+        indexed: bool,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let mut meta = self.load_epg_cache_meta();
+        let now = crate::audit::now_iso();
+        if fetched {
+            meta.last_fetch_at = Some(now.clone());
+        }
+        if indexed {
+            meta.last_index_at = Some(now);
+        }
+        if let Some(e) = etag.map(str::trim).filter(|s| !s.is_empty()) {
+            meta.etag = Some(e.to_string());
+        }
+        if let Some(lm) = last_modified.map(str::trim).filter(|s| !s.is_empty()) {
+            meta.last_modified = Some(lm.to_string());
+        }
+        self.save_epg_cache_meta(&meta)
+    }
+
     pub fn add_file_source(&self, path: &Path) -> Result<PlaylistSource, StoreError> {
         let content = std::fs::read_to_string(path)?;
         let id = uuid::Uuid::new_v4().simple().to_string();
@@ -1359,6 +1405,11 @@ mod tests {
         let loaded = store.load_settings().unwrap();
         assert_eq!(loaded.audit_delay_ms, 6000);
         assert!(loaded.iptv_tuner.enabled);
+        let mut meta = crate::epg::EpgCacheMeta::default();
+        meta.etag = Some("\"abc\"".into());
+        store.save_epg_cache_meta(&meta).unwrap();
+        let loaded_meta = store.load_epg_cache_meta();
+        assert_eq!(loaded_meta.etag.as_deref(), Some("\"abc\""));
     }
 
     #[test]
