@@ -206,6 +206,66 @@ pub fn hosted_url(tuner_base: &str, tvg_id: &str) -> String {
     format!("{}{}", tuner_base.trim_end_matches('/'), hosted_path(tvg_id))
 }
 
+/// C# LogoSaver.PlaylistLogo — local tuner logos replace tvg-logo when asked.
+pub fn playlist_logo(ch: &ManagedChannel, tuner_base: &str, use_local: bool) -> Option<String> {
+    if !use_local || ch.tvg_id.as_deref().unwrap_or("").trim().is_empty() {
+        return ch
+            .tvg_logo
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+    }
+    Some(hosted_url(tuner_base, ch.tvg_id.as_deref().unwrap()))
+}
+
+pub fn try_resolve_hosted(root: &Path, request_path: &str) -> Option<PathBuf> {
+    let mut rel = request_path.trim();
+    if rel.len() >= 7 && rel[..7].eq_ignore_ascii_case("/logos/") {
+        rel = &rel[7..];
+    }
+    let rel = url_unescape(rel).trim_start_matches(['/', '\\']).to_string();
+    let stem = if rel.to_ascii_lowercase().ends_with(".png") {
+        &rel[..rel.len() - 4]
+    } else {
+        &rel
+    };
+    let name = if stem.contains('/') || stem.contains('\\') {
+        std::path::Path::new(stem)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(stem)
+    } else {
+        stem
+    };
+    let found = find_by_tvg_id(root, name)?;
+    let root_full = std::fs::canonicalize(root).ok()?;
+    let found_full = std::fs::canonicalize(&found).ok()?;
+    if found_full.starts_with(&root_full) {
+        Some(found)
+    } else {
+        None
+    }
+}
+
+fn url_unescape(s: &str) -> String {
+    let mut out = String::new();
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or(""), 16) {
+                out.push(v as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i] as char);
+        i += 1;
+    }
+    out
+}
+
 pub fn find_by_tvg_id(root: &Path, tvg_id: &str) -> Option<PathBuf> {
     if tvg_id.trim().is_empty() {
         return None;

@@ -82,6 +82,19 @@ impl TunerServerProfile {
             self.bind_address = "127.0.0.1".into();
         }
     }
+
+    pub fn base_url(&self) -> String {
+        let host = if self.allow_lan
+            && matches!(self.bind_address.as_str(), "0.0.0.0" | "+" | "*")
+        {
+            "127.0.0.1"
+        } else if self.bind_address.trim().is_empty() {
+            "127.0.0.1"
+        } else {
+            self.bind_address.as_str()
+        };
+        format!("http://{host}:{}", self.port)
+    }
 }
 
 fn new_device_id() -> String {
@@ -184,6 +197,37 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    pub fn advertised_member_epg_url(&self) -> Option<String> {
+        let gz = self.member_feed_url_gz.trim();
+        if !gz.is_empty() {
+            return Some(gz.to_string());
+        }
+        let u = self.member_feed_url.trim();
+        if !u.is_empty() {
+            Some(u.to_string())
+        } else {
+            None
+        }
+    }
+
+    pub fn tuner_advertised_epg(&self, p: &TunerServerProfile) -> String {
+        if self.tuner_use_member_epg {
+            if let Some(u) = self.advertised_member_epg_url() {
+                return u;
+            }
+        }
+        format!("{}/guide.xml", p.base_url().trim_end_matches('/'))
+    }
+
+    pub fn lineup_codecs(&self) -> (&'static str, &'static str) {
+        // Mpeg2Ac3 forces ffmpeg; VLC+copy_aac stays H264/AAC.
+        if self.remux_profile.eq_ignore_ascii_case("copy_aac") {
+            ("H264", "AAC")
+        } else {
+            ("MPEG2", "AC3")
+        }
+    }
+
     pub fn enabled_tuner_count(&self) -> i32 {
         [
             self.plex_tuner.enabled,

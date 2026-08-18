@@ -630,6 +630,23 @@ input.tvg-ok {
   border-radius: 4px 4px 0 0;
 }
 
+.tuner-card {
+  margin-bottom: 12px;
+}
+
+.tuner-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.tuner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .output-table {
   background: #16161e;
   border: 1px solid var(--studio-stroke);

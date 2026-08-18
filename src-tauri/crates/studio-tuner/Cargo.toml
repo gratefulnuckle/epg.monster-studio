@@ -7,3 +7,7 @@ description = "Local HDHomeRun / IPTV tuner hosts"
 
 [dependencies]
 studio-core = { path = "../studio-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+ureq = { version = "2", default-features = false, features = ["tls"] }

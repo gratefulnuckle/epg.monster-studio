@@ -2,6 +2,7 @@
 
 pub mod audit;
 pub mod curation;
+pub mod hdhr;
 pub mod epg;
 pub mod export;
 pub mod logo;

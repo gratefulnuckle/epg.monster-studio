@@ -21,11 +21,15 @@ use studio_core::settings::AppSettings;
 use studio_core::store::SqliteStore;
 use studio_core::tools::detect_bundled;
 use studio_core::{DISPLAY_NAME, VERSION};
+use studio_tuner::manager::{self, TunerManager};
+use studio_tuner::host::TunerSnapshot;
 use tauri::Manager;
+use std::sync::Arc;
 
 struct AppState {
-    store: Mutex<SqliteStore>,
+    store: Arc<Mutex<SqliteStore>>,
     audit: Mutex<audit::ProcessStore>,
+    tuner: Mutex<TunerManager>,
 }
 
 #[derive(Serialize)]
@@ -1122,6 +1126,146 @@ fn audit_results(state: tauri::State<AppState>, job_id: Option<String>) -> Resul
         .map_err(|e| e.to_string())
 }
 
+fn make_snapshot(store: &SqliteStore) -> TunerSnapshot {
+    let settings = store.load_settings().unwrap_or_default();
+    let channels = store.list_managed(None).unwrap_or_default();
+    let ids: Vec<String> = studio_core::lineup::ordered_lineup(&channels)
+        .into_iter()
+        .map(|c| studio_core::hdhr::channel_xml_id(&c))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let programmes = store
+        .list_programmes(&ids, "1970-01-01T00:00:00Z", "2099-01-01T00:00:00Z")
+        .unwrap_or_default();
+    manager::snapshot_from_settings(channels, programmes, &settings)
+}
+
+fn persist_settings(state: &tauri::State<AppState>, settings: &AppSettings) -> Result<(), String> {
+    lock_store(state)?.save_settings(settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn tuner_statuses(state: tauri::State<AppState>) -> Result<Vec<manager::TunerRuntimeStatus>, String> {
+    let settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
+    Ok(state.tuner.lock().map_err(|e| e.to_string())?.all_statuses(&settings))
+}
+
+#[tauri::command]
+fn tuner_start(state: tauri::State<AppState>, kind: String) -> Result<String, String> {
+    let store = Arc::clone(&state.store);
+    let snap: Arc<dyn Fn() -> TunerSnapshot + Send + Sync> = Arc::new(move || {
+        let g = store.lock().ok();
+        match g {
+            Some(s) => make_snapshot(&s),
+            None => TunerSnapshot {
+                channels: vec![],
+                programmes: vec![],
+                remux: true,
+                epg_url: None,
+                host_logos: false,
+                use_local_logos: false,
+                logo_root: String::new(),
+                video_codec: "H264".into(),
+                audio_codec: "AAC".into(),
+                ffmpeg_path: String::new(),
+            },
+        }
+    });
+    let mut settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
+    let mut tuner = state.tuner.lock().map_err(|e| e.to_string())?;
+    tuner.try_start(&mut settings, &kind, snap)?;
+    drop(tuner);
+    persist_settings(&state, &settings)?;
+    Ok(format!("{kind} tuner started"))
+}
+
+#[tauri::command]
+fn tuner_stop(state: tauri::State<AppState>, kind: String) -> Result<(), String> {
+    let mut settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
+    state.tuner.lock().map_err(|e| e.to_string())?.stop(&mut settings, &kind);
+    persist_settings(&state, &settings)
+}
+
+#[tauri::command]
+fn tuner_start_all(state: tauri::State<AppState>) -> Result<Vec<String>, String> {
+    let settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
+    let kinds: Vec<String> = [
+        &settings.plex_tuner,
+        &settings.jellyfin_tuner,
+        &settings.emby_tuner,
+        &settings.iptv_tuner,
+    ]
+    .into_iter()
+    .filter(|p| p.enabled && !p.running)
+    .map(|p| p.kind.clone())
+    .collect();
+    drop(settings);
+    let mut errors = Vec::new();
+    for k in kinds {
+        if let Err(e) = tuner_start(state.clone(), k.clone()) {
+            errors.push(format!("{k}: {e}"));
+        }
+    }
+    Ok(errors)
+}
+
+#[tauri::command]
+fn tuner_stop_all(state: tauri::State<AppState>) -> Result<(), String> {
+    let mut settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
+    state.tuner.lock().map_err(|e| e.to_string())?.stop_all(&mut settings);
+    persist_settings(&state, &settings)
+}
+
+#[tauri::command]
+fn tuner_set_max(state: tauri::State<AppState>, kind: String, max: i32) -> Result<(), String> {
+    let mut settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
+    state
+        .tuner
+        .lock()
+        .map_err(|e| e.to_string())?
+        .set_max(&mut settings, &kind, max)?;
+    persist_settings(&state, &settings)
+}
+
+#[tauri::command]
+fn tuner_self_test(state: tauri::State<AppState>) -> Result<String, String> {
+    let settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
+    let statuses = state.tuner.lock().map_err(|e| e.to_string())?.all_statuses(&settings);
+    drop(settings);
+    let (_reports, json) = manager::self_test(&statuses);
+    Ok(json)
+}
+
+#[tauri::command]
+fn tuner_logs(state: tauri::State<AppState>) -> Result<Vec<manager::TunerLogLine>, String> {
+    Ok(state.tuner.lock().map_err(|e| e.to_string())?.logs().to_vec())
+}
+
+#[tauri::command]
+fn tuner_graphs(state: tauri::State<AppState>) -> Result<Vec<String>, String> {
+    Ok(state.tuner.lock().map_err(|e| e.to_string())?.graphs())
+}
+
+#[tauri::command]
+fn tuner_help(state: tauri::State<AppState>, kind: String) -> Result<String, String> {
+    let settings = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
+    let st = state
+        .tuner
+        .lock()
+        .map_err(|e| e.to_string())?
+        .status(&settings, &kind)
+        .ok_or_else(|| "unknown tuner".to_string())?;
+    Ok(studio_tuner::help::text_for(
+        &st.kind,
+        st.base_url.trim_end_matches('/'),
+        &st.device_id,
+        st.port,
+        st.enabled,
+        st.running,
+        settings.jellyfin_tuner.downspiral_enabled,
+    ))
+}
+
 #[tauri::command]
 fn epg_search_images_url(name: String) -> String {
     let q = if name.trim().is_empty() {
@@ -1143,8 +1287,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
-            store: Mutex::new(store),
+            store: Arc::new(Mutex::new(store)),
             audit: Mutex::new(audit_store),
+            tuner: Mutex::new(TunerManager::new()),
         })
         .invoke_handler(tauri::generate_handler![
             get_studio_info,
@@ -1178,6 +1323,16 @@ pub fn run() {
             save_tuner_lineup,
             export_channels_json,
             publish_channels,
+            tuner_statuses,
+            tuner_start,
+            tuner_stop,
+            tuner_start_all,
+            tuner_stop_all,
+            tuner_set_max,
+            tuner_self_test,
+            tuner_logs,
+            tuner_graphs,
+            tuner_help,
             clear_managed,
             load_settings,
             save_settings,

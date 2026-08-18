@@ -1101,6 +1101,40 @@ impl SqliteStore {
         Ok(true)
     }
 
+    pub fn list_programmes(&self, tvg_ids: &[String], from_utc: &str, to_utc: &str) -> Result<Vec<crate::models::EpgProgramme>, StoreError> {
+        if tvg_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut sql = String::from(
+            "SELECT tvg_id, title, description, start_utc, stop_utc FROM epg_programmes WHERE (",
+        );
+        for i in 0..tvg_ids.len() {
+            if i > 0 {
+                sql.push_str(" OR ");
+            }
+            sql.push_str(&format!("tvg_id = ?{} COLLATE NOCASE", i + 1));
+        }
+        sql.push_str(&format!(
+            ") AND stop_utc > ?{} AND start_utc < ?{} ORDER BY tvg_id, start_utc",
+            tvg_ids.len() + 1,
+            tvg_ids.len() + 2
+        ));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = tvg_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        params.push(&from_utc);
+        params.push(&to_utc);
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            Ok(crate::models::EpgProgramme {
+                tvg_id: r.get(0)?,
+                title: r.get(1)?,
+                description: r.get(2)?,
+                start_utc: r.get(3)?,
+                stop_utc: r.get(4)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     pub fn pending_swap_count(&self, limit: i32) -> Result<i32, StoreError> {
         let n: i32 = self.conn.query_row(
             "SELECT COUNT(*) FROM (

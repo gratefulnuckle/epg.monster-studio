@@ -85,6 +85,12 @@ pub fn auto_populate(channels: &mut [ManagedChannel], ids_in_order: &[String]) {
     }
 }
 
+pub fn by_number(channels: &[ManagedChannel], number: i32) -> Option<ManagedChannel> {
+    ordered_lineup(channels)
+        .into_iter()
+        .find(|c| c.tuner_number == Some(number))
+}
+
 pub fn ordered_lineup(channels: &[ManagedChannel]) -> Vec<ManagedChannel> {
     let mut list: Vec<ManagedChannel> = channels
         .iter()

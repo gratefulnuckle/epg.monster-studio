@@ -5,6 +5,7 @@ import { epgHtml, mountEpg } from "./epg";
 import { logoHtml, mountLogo } from "./logo";
 import { auditHtml, mountAudit } from "./audit";
 import { outputHtml, mountOutput } from "./output";
+import { tunerHtml, mountTuner } from "./tuner";
 
 export type NavId =
   | "audit"
@@ -97,6 +98,7 @@ export function mountShell(root: HTMLElement): void {
     if (id === "logoaudit") void mountLogo(page, showToast);
     if (id === "autoaudit") void mountAudit(page, showToast);
     if (id === "output") void mountOutput(page, showToast);
+    if (id === "tuner") void mountTuner(page, showToast);
   };
 
   root.querySelectorAll<HTMLButtonElement>("[data-nav]").forEach((btn) => {
@@ -358,17 +360,7 @@ function pageHtml(id: NavId): string {
     case "output":
       return outputHtml();
     case "tuner":
-      return `
-        <h1 class="page-title">TV Tuner</h1>
-        <p class="page-sub">Start and stop the local tuner hosts. Enable a card in Settings, then Start here. Ports are 8080 Plex, 8081 Jellyfin, 8082 Emby, 8083 IPTV. Channel numbers stay in Managed Output → Tuner lineup.</p>
-        <div>
-          <button class="accent">Start all enabled</button>
-          <button>Stop all</button>
-          <button>Log</button>
-          <button>Graphs</button>
-          <button>Self-test</button>
-        </div>
-        <p class="page-sub">Enable a tuner in Settings (Plex, Jellyfin, Emby, or IPTV), Save, then press Start on that card.</p>`;
+      return tunerHtml();
     case "settings":
       return settingsHtml();
   }

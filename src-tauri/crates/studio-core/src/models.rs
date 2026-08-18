@@ -128,6 +128,16 @@ pub struct CatalogEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct EpgProgramme {
+    pub tvg_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub start_utc: String,
+    pub stop_utc: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct NowPlaying {
     pub title: String,
     pub start_local: String,
