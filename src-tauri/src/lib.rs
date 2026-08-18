@@ -292,7 +292,7 @@ fn promote_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let w = app
         .get_webview_window("main")
         .ok_or_else(|| "main window missing".to_string())?;
-    let _ = w.set_decorations(true);
+    let _ = w.set_decorations(false);
     let _ = w.set_resizable(true);
     let _ = w.set_minimizable(true);
     let _ = w.set_maximizable(true);

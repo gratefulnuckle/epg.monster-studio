@@ -1,4 +1,6 @@
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, type Channel, type Source } from "./api";
 import { editorHtml, mountEditor } from "./editor";
 import { epgHtml, mountEpg } from "./epg";
@@ -33,9 +35,17 @@ const SEARCH_PAGES: NavId[] = ["audit", "editor", "output"];
 export function mountShell(root: HTMLElement): void {
   root.innerHTML = `
     <div class="shell">
-      <header class="titlebar" data-tauri-drag-region>
-        <span class="brand">epg.monster studio</span>
+      <header class="titlebar">
+        <div class="titlebar-drag" data-tauri-drag-region>
+          <span class="brand">epg.monster studio</span>
+        </div>
         <input class="search" id="search" placeholder="Search name, group, tvg-id, URL…" />
+        <div class="titlebar-drag titlebar-spacer" data-tauri-drag-region></div>
+        <div class="caption">
+          <button type="button" class="caption-btn" id="win-min" title="Minimize" aria-label="Minimize">&#xE921;</button>
+          <button type="button" class="caption-btn" id="win-max" title="Maximize" aria-label="Maximize">&#xE922;</button>
+          <button type="button" class="caption-btn" id="win-close" title="Close" aria-label="Close">&#xE8BB;</button>
+        </div>
       </header>
       <div class="workspace">
         <aside class="nav">
@@ -109,6 +119,7 @@ export function mountShell(root: HTMLElement): void {
 
   root.querySelector("#about")!.addEventListener("click", () => aboutDlg.classList.add("open"));
   root.querySelector("#about-close")!.addEventListener("click", () => aboutDlg.classList.remove("open"));
+  wireCaptionButtons(root);
 
   let searchTimer = 0;
   search.addEventListener("input", () => {
@@ -125,6 +136,45 @@ export function mountShell(root: HTMLElement): void {
     const id = ev.payload as NavId;
     if (id) render(id);
   });
+}
+
+function wireCaptionButtons(root: HTMLElement): void {
+  const win = getCurrentWindow();
+  const maxBtn = root.querySelector<HTMLButtonElement>("#win-max")!;
+  const paintMax = async () => {
+    try {
+      const max = await win.isMaximized();
+      maxBtn.innerHTML = max ? "&#xE923;" : "&#xE922;";
+      maxBtn.title = max ? "Restore" : "Maximize";
+      maxBtn.setAttribute("aria-label", maxBtn.title);
+    } catch {
+      /* ignore */
+    }
+  };
+  root.querySelector("#win-min")!.addEventListener("click", () => {
+    void (async () => {
+      await win.hide();
+      await invoke("mark_tray_state");
+    })();
+  });
+  maxBtn.addEventListener("click", () => {
+    void win.toggleMaximize().then(() => paintMax());
+  });
+  root.querySelector("#win-close")!.addEventListener("click", () => {
+    void (async () => {
+      await win.hide();
+      await invoke("mark_tray_state");
+    })();
+  });
+  root.querySelectorAll<HTMLElement>("[data-tauri-drag-region]").forEach((el) => {
+    el.addEventListener("dblclick", () => {
+      void win.toggleMaximize().then(() => paintMax());
+    });
+  });
+  void win.onResized(() => {
+    void paintMax();
+  });
+  void paintMax();
 }
 
 async function mountSources(page: HTMLElement, toast: (s: string) => void): Promise<void> {

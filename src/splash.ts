@@ -7,8 +7,8 @@ const LOCAL_PROGRESS = [8, 16, 24, 32, 38, 44, 50];
 
 export async function runSplash(app: HTMLElement): Promise<void> {
   app.innerHTML = `
-    <div class="splash">
-      <div class="splash-card">
+    <div class="splash" data-tauri-drag-region>
+      <div class="splash-card" data-tauri-drag-region>
         <img src="/logo.png" alt="epg.monster studio" />
         <div class="splash-ver" id="splash-ver">epg.monster studio  ·  v1.0-beta</div>
         <div class="splash-list" id="splash-list"></div>

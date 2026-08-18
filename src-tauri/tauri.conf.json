@@ -21,6 +21,7 @@
         "maximizable": false,
         "minimizable": false,
         "decorations": false,
+        "shadow": true,
         "center": true,
         "backgroundColor": "#0C0C10"
       }

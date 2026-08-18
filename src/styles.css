@@ -26,6 +26,7 @@ body,
 #app {
   margin: 0;
   height: 100%;
+  overflow: hidden;
   background: var(--studio-bg);
   color: var(--studio-name);
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
@@ -77,18 +78,58 @@ textarea {
 .titlebar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0 16px 0 56px;
+  padding: 0 0 0 16px;
   border-bottom: 1px solid #1c1c24;
+  user-select: none;
+}
+
+.titlebar-drag {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 100%;
+}
+
+.titlebar-spacer {
+  flex: 1;
 }
 
 .titlebar .brand {
   opacity: 0.85;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .search {
   width: 320px;
+  margin: 0 12px;
+}
+
+.caption {
+  display: flex;
+  height: 100%;
+  margin-left: 8px;
+}
+
+.caption-btn {
+  width: 46px;
+  height: 48px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #f2f2f2;
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  font-size: 10px;
+  line-height: 48px;
+}
+
+.caption-btn:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.caption-btn:active {
+  background: rgba(255, 255, 255, 0.11);
 }
 
 .search.hidden {
