@@ -73,7 +73,7 @@ export function mountShell(root: HTMLElement): { toast: (s: string) => void } {
           <h2>About</h2>
           <img src="/logo.png" alt="epg.monster studio" style="width:96px;height:96px" />
           <p class="chan-name" style="font-size:22px">epg.monster studio</p>
-          <p class="page-sub" id="about-ver">version v1.0-beta</p>
+          <p class="page-sub" id="about-ver">version v2.0.0 (dev)</p>
           <div style="text-align:left">
             <p><strong>What it is</strong><br />A Windows workspace for a legal IPTV lineup: import sources, curate channels and backups, match EPG from epg.monster, check logos and streams, then publish a managed playlist or a local virtual tuner.</p>
             <p><strong>Built with</strong><br />Rust and TypeScript, Tauri v2, SQLite (rusqlite). Playback and probes use bundled ffmpeg, ffprobe, and mpv. Optional VLC if installed.</p>
@@ -136,10 +136,10 @@ export function mountShell(root: HTMLElement): { toast: (s: string) => void } {
 
   root.querySelector("#about")!.addEventListener("click", () => {
     aboutDlg.classList.add("open");
-    void invoke<{ version: string; displayName: string }>("get_studio_info")
+    void invoke<{ version: string; displayVersion?: string; displayName: string }>("get_studio_info")
       .then((info) => {
         const el = root.querySelector("#about-ver");
-        if (el) el.textContent = `version ${info.version}`;
+        if (el) el.textContent = `version ${info.displayVersion || info.version}`;
       })
       .catch(() => {
         /* keep fallback */

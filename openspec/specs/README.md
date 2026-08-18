@@ -6,4 +6,4 @@ These requirements describe the shipped Tauri remake of epg.monster studio (C# W
 
 C# source still wins if a spec and `S:\Projects\epg.monster-studio` disagree.
 
-Parity walk tasks 13.1–13.4 were left for a later pass (side-by-side UI, real AppData DB, tuner self-test, `/lineup.json` leak check).
+Parity walk 13.1–13.4 was run 2026-08-18 against the live `%LocalAppData%\epg.monster-studio` DB (3 sources, 2035 managed, all in tuner). Playlist Editor P0 is in the Tauri UI. `studio-tuner` `parity_walk` self-tests Plex/Jellyfin/Emby/IPTV (5/6/5/4) and checks `/lineup.json` does not contain provider stream URLs. Residual editor chrome vs WinUI: group rename is `window.prompt` (not an in-place popup); variant Info is a toast.

@@ -147,6 +147,9 @@ pub struct AppSettings {
     pub member_max_body_bytes: i32,
     pub member_last_published_at: String,
     pub member_last_ping_at: String,
+    /// When on, splash starts a GitHub latest-release check. Default off.
+    #[serde(default)]
+    pub check_for_app_updates: bool,
 }
 
 impl Default for AppSettings {
@@ -192,6 +195,7 @@ impl Default for AppSettings {
             member_max_body_bytes: 3_145_728,
             member_last_published_at: String::new(),
             member_last_ping_at: String::new(),
+            check_for_app_updates: false,
         }
     }
 }

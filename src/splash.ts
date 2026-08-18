@@ -7,34 +7,51 @@ type SplashEpg = { catalog: number; programmes: number; cached: boolean };
 const LOCAL_PROGRESS = [8, 16, 24, 32, 38, 44, 50];
 
 export async function runSplash(app: HTMLElement): Promise<void> {
+  document.documentElement.classList.add("splash-open");
   app.innerHTML = `
     <div class="splash" data-tauri-drag-region>
       <div class="splash-card" data-tauri-drag-region>
-        <img src="/logo.png" alt="epg.monster studio" />
-        <div class="splash-ver" id="splash-ver">epg.monster studio  ·  v1.0-beta</div>
-        <div class="splash-list" id="splash-list"></div>
-        <div class="splash-foot">
-          <div class="splash-bar"><span id="splash-bar"></span></div>
-          <div class="splash-status" id="splash-status">Checking resources…</div>
+        <div class="splash-logo-wrap">
+          <img class="splash-logo" src="/logo.png" alt="epg.monster studio" />
         </div>
+        <div class="splash-list" id="splash-list"></div>
+        <div class="splash-mid">
+          <div class="splash-ver-line">
+            <span class="splash-ver" id="splash-ver">epg.monster studio  ·  v2.0.0 (dev)</span>
+            <span class="splash-ver-sep"> / </span>
+            <span class="splash-issues-line" id="splash-issues">0 open issues</span>
+          </div>
+          <div class="splash-status">
+            <span id="splash-pct">0%</span>
+            <span id="splash-status">Checking resources…</span>
+          </div>
+        </div>
+      </div>
+      <div class="splash-meter" id="splash-meter">
+        <div class="splash-meter-fill" id="splash-lock"></div>
       </div>
     </div>
   `;
 
   const list = document.getElementById("splash-list")!;
-  const bar = document.getElementById("splash-bar")!;
+  const lock = document.getElementById("splash-lock")!;
   const ver = document.getElementById("splash-ver")!;
   const status = document.getElementById("splash-status")!;
 
   try {
-    const info = await invoke<{ version: string; displayName: string }>("get_studio_info");
-    ver.textContent = `${info.displayName}  ·  ${info.version}`;
+    const info = await invoke<{
+      version: string;
+      displayVersion?: string;
+      displayName: string;
+    }>("get_studio_info");
+    ver.textContent = `${info.displayName}  ·  ${info.displayVersion || info.version}`;
   } catch {
     /* splash still works if invoke is not ready */
   }
 
+  const pct = document.getElementById("splash-pct")!;
   const started = Date.now();
-  setProgress(bar, 0);
+  setProgress(lock, pct, 0);
 
   try {
     const missing = await invoke<{ id: string; label: string }[]>("tools_missing");
@@ -42,7 +59,7 @@ export async function runSplash(app: HTMLElement): Promise<void> {
       status.textContent = "Downloading portable ffmpeg / mpv…";
       const unlisten = await listen<{ message: string; percent: number }>("tools-progress", (ev) => {
         status.textContent = ev.payload.message;
-        setProgress(bar, Math.max(1, Math.min(44, ev.payload.percent * 0.45)));
+        setProgress(lock, pct, Math.max(1, Math.min(44, ev.payload.percent * 0.45)));
       });
       try {
         await invoke("tools_ensure");
@@ -71,6 +88,30 @@ export async function runSplash(app: HTMLElement): Promise<void> {
     ];
   }
 
+  let updatesOn = false;
+  try {
+    const st = await invoke<{ CheckForAppUpdates?: boolean }>("load_settings");
+    updatesOn = !!st.CheckForAppUpdates;
+  } catch {
+    updatesOn = false;
+  }
+  if (updatesOn) {
+    const updateRow = addWaiting(list, "Checking github for updates");
+    void invoke<SplashCheck>("check_app_update")
+      .then((r) => complete(updateRow, r.ok, r.detail))
+      .catch((e) => complete(updateRow, false, shorten(String(e))));
+  }
+
+  const issuesLine = document.getElementById("splash-issues")!;
+  void invoke<SplashCheck>("check_github_issues")
+    .then((r) => {
+      const n = (r.detail || "").match(/^(\d+)\s+open/)?.[1];
+      issuesLine.textContent = n != null ? `${n} open issues` : r.detail || "0 open issues";
+    })
+    .catch(() => {
+      issuesLine.textContent = "0 open issues";
+    });
+
   const rows: HTMLElement[] = [];
   for (const c of checks) {
     rows.push(addWaiting(list, c.label));
@@ -81,7 +122,7 @@ export async function runSplash(app: HTMLElement): Promise<void> {
   for (let i = 0; i < checks.length; i++) {
     const c = checks[i];
     status.textContent = `Checking ${c.label}…`;
-    setProgress(bar, LOCAL_PROGRESS[i] ?? 50);
+    setProgress(lock, pct, LOCAL_PROGRESS[i] ?? 50);
     await delay(200);
     complete(rows[i], c.ok, c.detail);
     await delay(80);
@@ -89,7 +130,7 @@ export async function runSplash(app: HTMLElement): Promise<void> {
 
   setCheckText(xmlRow, "0%");
   setCheckText(nowRow, "0%");
-  setProgress(bar, 55);
+  setProgress(lock, pct, 55);
 
   try {
     const epg = await invoke<SplashEpg>("splash_epg_status");
@@ -101,7 +142,7 @@ export async function runSplash(app: HTMLElement): Promise<void> {
         epg.programmes > 0,
         `cached ${fmt(epg.programmes)} programmes`,
       );
-      setProgress(bar, 99);
+      setProgress(lock, pct, 99);
     } else {
       status.textContent = "Downloading epg.monster…";
       setCheckText(xmlRow, "…");
@@ -124,16 +165,20 @@ export async function runSplash(app: HTMLElement): Promise<void> {
     complete(nowRow, false, "skipped");
   }
 
-  setProgress(bar, 100);
-  status.textContent = "Ready — opening studio…";
+  status.textContent = "Reticulating splines......";
+  setProgress(lock, pct, 99);
+  await delay(2000);
+  status.textContent = "Launching...";
+  setProgress(lock, pct, 100);
   const wait = Math.max(0, 5000 - (Date.now() - started));
   await delay(wait);
+  document.documentElement.classList.remove("splash-open");
 }
 
 function addWaiting(list: HTMLElement, label: string): HTMLElement {
   const row = document.createElement("div");
   row.className = "splash-row waiting";
-  row.innerHTML = `<span class="splash-icon">○</span><span class="splash-label"></span><span class="splash-detail">waiting…</span>`;
+  row.innerHTML = `<span class="splash-icon"></span><span class="splash-label"></span><span class="splash-detail"></span>`;
   row.querySelector(".splash-label")!.textContent = label;
   list.appendChild(row);
   return row;
@@ -141,6 +186,7 @@ function addWaiting(list: HTMLElement, label: string): HTMLElement {
 
 function complete(row: HTMLElement, ok: boolean, detail: string): void {
   row.classList.remove("waiting");
+  row.classList.add("done");
   row.classList.toggle("fail", !ok);
   row.querySelector(".splash-icon")!.textContent = ok ? "✓" : "✗";
   row.querySelector(".splash-detail")!.textContent = ok
@@ -152,8 +198,10 @@ function setCheckText(row: HTMLElement, text: string): void {
   row.querySelector(".splash-detail")!.textContent = text;
 }
 
-function setProgress(bar: HTMLElement, percent: number): void {
-  bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+function setProgress(lock: HTMLElement, pct: HTMLElement, percent: number): void {
+  const n = Math.max(0, Math.min(100, Math.round(percent)));
+  lock.style.width = `${n}%`;
+  pct.textContent = `${n}%`;
 }
 
 function delay(ms: number): Promise<void> {

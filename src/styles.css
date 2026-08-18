@@ -73,6 +73,7 @@ textarea {
   display: grid;
   grid-template-rows: 48px 1fr;
   height: 100%;
+  background: var(--studio-bg);
 }
 
 .titlebar {
@@ -374,9 +375,22 @@ textarea {
   display: block;
 }
 
-.splash {
+html.splash-open,
+html.splash-open body,
+html.splash-open #app {
+  background: var(--studio-bg);
   height: 100%;
-  display: grid;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+.splash {
+  position: relative;
+  height: 100%;
+  width: 100%;
+  display: block;
+  padding: 0;
   background: var(--studio-bg);
 }
 
@@ -384,37 +398,85 @@ textarea {
   height: 100%;
   box-sizing: border-box;
   background: var(--studio-bg);
-  border: 1px solid var(--studio-stroke);
-  border-radius: 16px;
-  padding: 18px 24px 16px;
-  display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  border: 0;
+  border-radius: 0;
+  padding: 18px 24px 74px;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
+  overflow: hidden;
+  position: relative;
 }
 
-.splash-card img {
+.splash-logo-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.splash-logo {
   display: block;
-  width: 200px;
-  height: 120px;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
   margin: 0 auto;
+  animation: splash-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes splash-breathe {
+  0%,
+  100% {
+    opacity: 0.88;
+    filter: drop-shadow(0 0 0 transparent);
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 10px rgba(108, 92, 231, 0.35));
+  }
+}
+
+.splash-mid {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.splash-ver-line {
+  font-size: 11px;
+  text-align: center;
 }
 
 .splash-ver {
-  text-align: center;
-  font-size: 11px;
-  color: var(--studio-accent);
-  opacity: 0.85;
+  color: #ffffff;
+}
+
+.splash-ver-sep {
+  color: #ffffff;
+}
+
+.splash-issues-line {
+  color: #ffffff;
 }
 
 .splash-list {
-  background: var(--studio-card);
-  border: 1px solid var(--studio-stroke);
-  border-radius: 10px;
-  padding: 8px 12px;
-  overflow: auto;
-  min-height: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 10px;
+  flex: 0 0 auto;
+  width: 100%;
+  overflow: hidden;
 }
+
+/* Restore box: background var(--studio-card); border: 1px solid var(--studio-stroke); */
 
 .splash-row {
   display: grid;
@@ -423,15 +485,33 @@ textarea {
   min-height: 18px;
   margin: 2px 0;
   font-size: 12px;
-  color: var(--studio-accent);
+  color: #60cdff;
+  opacity: 0.55;
+  transform: translateX(-4px);
+  transition: opacity 0.28s ease, transform 0.28s ease, color 0.2s ease;
 }
 
 .splash-row.waiting {
-  opacity: 0.7;
+  opacity: 0.45;
 }
 
+.splash-row.done {
+  opacity: 1;
+  transform: none;
+}
+
+.splash-row.done .splash-icon {
+  color: var(--studio-match);
+}
+
+.splash-row.fail {
+  opacity: 1;
+  transform: none;
+}
+
+.splash-row.fail .splash-icon,
 .splash-row.fail .splash-detail {
-  color: #c42b1c;
+  color: var(--studio-broken);
 }
 
 .splash-label {
@@ -448,30 +528,53 @@ textarea {
   white-space: nowrap;
 }
 
-.splash-foot {
-  display: grid;
-  gap: 6px;
-}
-
 .splash-status {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   text-align: center;
   font-size: 12px;
-  color: var(--studio-accent);
+  color: #ffffff;
   opacity: 0.9;
 }
 
-.splash-bar {
-  height: 6px;
-  background: #1e1e28;
-  border-radius: 99px;
+/* Restore loading info: display: flex; */
+
+.splash-meter {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 64px;
+  margin: 0;
+  z-index: 20;
+  border: 0;
+  border-top: 1px solid var(--studio-stroke);
+  border-radius: 0;
   overflow: hidden;
+  background: var(--studio-feed);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.55);
 }
 
-.splash-bar > span {
-  display: block;
-  height: 100%;
-  background: var(--studio-accent);
+.splash-meter-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
   width: 0%;
+  border-radius: 0;
+  background-color: var(--studio-header);
+  background-image:
+    repeating-linear-gradient(
+      -45deg,
+      rgba(12, 12, 16, 0.45) 0 8px,
+      transparent 8px 16px
+    ),
+    linear-gradient(90deg, #0d3d4a 0%, #60cdff 50%, var(--studio-accent) 100%);
+  background-size: 22px 22px, 100% 100%;
+  box-shadow: inset 0 1px 0 rgba(238, 238, 240, 0.06);
+  transition: width 0.28s ease-out;
 }
 
 .dialog-backdrop {

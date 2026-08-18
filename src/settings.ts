@@ -55,6 +55,7 @@ type AppSettings = {
   MemberMaxBodyBytes: number;
   MemberLastPublishedAt: string;
   MemberLastPingAt: string;
+  CheckForAppUpdates?: boolean;
 };
 
 type Ping = {
@@ -185,6 +186,7 @@ export function settingsHtml(): string {
           <button id="set-crashes">Open crash reports</button>
         </div>
         <p class="page-sub" id="set-logpath"></p>
+        <label class="check"><input type="checkbox" id="set-updates" /> Check for app updates</label>
         <div class="field"><label>Optional Python path</label><input id="set-py" placeholder="python.exe" /></div>
       </section>
     </div>
@@ -392,6 +394,7 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
       WeeklyAuditJson: JSON.stringify(week),
       WeeklyAuditAutoRun: chk("set-weekauto"),
       BlackDetectEnabled: chk("set-black"),
+      CheckForAppUpdates: chk("set-updates"),
       LogoSaveDirectory: val("set-logodir").trim() || folders.logoDir,
       HostLogosOnTuner: chk("set-hostlogos") || chk("set-locallogos"),
       UseLocalLogos: chk("set-locallogos"),
@@ -442,6 +445,7 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
     setVal("set-sun", week.Sunday.join(", "));
     setChk("set-weekauto", !!st.WeeklyAuditAutoRun);
     setChk("set-black", !!st.BlackDetectEnabled);
+    setChk("set-updates", !!st.CheckForAppUpdates);
     setVal("set-logodir", st.LogoSaveDirectory || folders.logoDir);
     setChk("set-hostlogos", !!st.HostLogosOnTuner);
     setChk("set-locallogos", !!st.UseLocalLogos);

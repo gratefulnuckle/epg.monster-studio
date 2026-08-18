@@ -25,7 +25,9 @@ use studio_core::store::SqliteStore;
 use studio_core::tools::{
     default_ffmpeg_path, default_ffprobe_path, default_mpv_path, default_vlc_path, detect_bundled,
 };
-use studio_core::{DISPLAY_NAME, VERSION};
+use studio_core::{
+    display_version, github_open_studio_issues, latest_github_tag, DISPLAY_NAME, VERSION,
+};
 use studio_tuner::manager::{self, TunerManager};
 use studio_tuner::host::TunerSnapshot;
 use tauri::{Emitter, Manager};
@@ -41,6 +43,7 @@ struct AppState {
 #[serde(rename_all = "camelCase")]
 struct StudioInfoDto {
     version: String,
+    display_version: String,
     display_name: String,
     database_path: String,
     managed_count: i32,
@@ -169,6 +172,7 @@ fn get_studio_info(state: tauri::State<AppState>) -> Result<StudioInfoDto, Strin
     let store = lock_store(&state)?;
     Ok(StudioInfoDto {
         version: VERSION.to_string(),
+        display_version: display_version(),
         display_name: DISPLAY_NAME.to_string(),
         database_path: database_path().to_string_lossy().into_owned(),
         managed_count: store.managed_count().unwrap_or(0),
@@ -279,6 +283,58 @@ struct SplashEpgStatus {
 }
 
 #[tauri::command]
+fn check_app_update() -> Result<SplashCheck, String> {
+    match latest_github_tag() {
+        Ok(tag) => {
+            let local = VERSION.trim_start_matches('v');
+            let remote = tag.trim_start_matches('v');
+            if remote == local || tag == VERSION {
+                Ok(SplashCheck {
+                    label: "Checking github for updates".into(),
+                    ok: true,
+                    detail: format!("up to date ({tag})"),
+                })
+            } else {
+                Ok(SplashCheck {
+                    label: "Checking github for updates".into(),
+                    ok: true,
+                    detail: format!("update {tag}"),
+                })
+            }
+        }
+        Err(e) => Ok(SplashCheck {
+            label: "Checking github for updates".into(),
+            ok: false,
+            detail: splash_shorten(&e),
+        }),
+    }
+}
+
+#[tauri::command]
+fn check_github_issues() -> Result<SplashCheck, String> {
+    match github_open_studio_issues() {
+        Ok((n, title)) => {
+            let detail = match (n, title) {
+                (0, _) => "0 open".into(),
+                (1, Some(t)) => format!("1 open · {t}"),
+                (n, Some(t)) => format!("{n} open · {t}"),
+                (n, None) => format!("{n} open"),
+            };
+            Ok(SplashCheck {
+                label: "GitHub open issues".into(),
+                ok: true,
+                detail,
+            })
+        }
+        Err(e) => Ok(SplashCheck {
+            label: "GitHub open issues".into(),
+            ok: false,
+            detail: splash_shorten(&e),
+        }),
+    }
+}
+
+#[tauri::command]
 fn splash_epg_status(state: tauri::State<AppState>) -> SplashEpgStatus {
     let store = lock_store(&state).ok();
     let catalog = store
@@ -308,8 +364,67 @@ fn promote_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let _ = w.set_min_size(Some(tauri::LogicalSize::new(960.0, 640.0)));
     let _ = w.set_size(tauri::LogicalSize::new(1400.0, 900.0));
     let _ = w.center();
+    apply_window_chrome(&w, false);
     let _ = w.set_focus();
     Ok(())
+}
+
+/// Splash: tight DWM rounding, no Win11 light border, transparent WebView2.
+/// Main: square window, studio fill, shadow back on.
+fn apply_window_chrome(window: &tauri::WebviewWindow, splash: bool) {
+    let _ = window.set_shadow(!splash);
+    let color = if splash {
+        tauri::window::Color(0, 0, 0, 0)
+    } else {
+        tauri::window::Color(0x0c, 0x0c, 0x10, 0xff)
+    };
+    let _ = window.set_background_color(Some(color));
+    #[cfg(windows)]
+    {
+        if let Ok(hwnd) = window.hwnd() {
+            set_dwm_chrome(hwnd.0 as isize, splash);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn set_dwm_chrome(hwnd: isize, splash: bool) {
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWA_BORDER_COLOR: u32 = 34;
+    const DWMWCP_DONOTROUND: u32 = 1;
+    const DWMWCP_ROUNDSMALL: u32 = 3;
+    const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+    let pref: u32 = if splash {
+        DWMWCP_ROUNDSMALL
+    } else {
+        DWMWCP_DONOTROUND
+    };
+    let border = DWMWA_COLOR_NONE;
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &border as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "dwmapi")]
+extern "system" {
+    fn DwmSetWindowAttribute(
+        hwnd: isize,
+        attr: u32,
+        pv: *const std::ffi::c_void,
+        cb: u32,
+    ) -> i32;
 }
 
 #[tauri::command]
@@ -1776,6 +1891,9 @@ pub fn run() {
         })
         .setup(|app| {
             studio_core::crash::append_log("Info", "App", "OnLaunched");
+            if let Some(w) = app.get_webview_window("main") {
+                apply_window_chrome(&w, true);
+            }
             let menu = tauri::menu::MenuBuilder::new(app)
                 .text("audit", "Add Sources")
                 .text("editor", "Playlist Editor")
@@ -1834,6 +1952,8 @@ pub fn run() {
             get_studio_info,
             splash_checks,
             splash_epg_status,
+            check_app_update,
+            check_github_issues,
             promote_main_window,
             detect_bundled_tools,
             tools_missing,

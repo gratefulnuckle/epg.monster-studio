@@ -97,10 +97,10 @@ Implementation of the 1:1 remake. Each task is done only when it matches the C# 
 
 ## 13. Parity gate
 
-- [ ] 13.1 Side-by-side pass of linux-parity.md acceptance (Playlist Editor P0).
-- [ ] 13.2 Open a real C# AppData DB (local only) and walk Add Sources → Editor → EPG → Logo → Stream → Output → Tuner.
-- [ ] 13.3 Self-test all four tuners.
-- [ ] 13.4 Confirm no provider URLs in `/lineup.json`.
+- [x] 13.1 Side-by-side pass of linux-parity.md acceptance (Playlist Editor P0).
+- [x] 13.2 Open a real C# AppData DB (local only) and walk Add Sources → Editor → EPG → Logo → Stream → Output → Tuner.
+- [x] 13.3 Self-test all four tuners.
+- [x] 13.4 Confirm no provider URLs in `/lineup.json`.
 - [x] 13.5 String audit: nav, placeholders, Settings headers match XAML.
 
 ## 14. Archive
