@@ -636,6 +636,15 @@ pub fn parse_weekly(json: &str) -> HashMap<String, Vec<String>> {
     plan
 }
 
+pub fn serialize_weekly(plan: &HashMap<String, Vec<String>>) -> String {
+    let mut ordered = serde_json::Map::new();
+    for d in WEEK_DAYS {
+        let list = groups_for(plan, d);
+        ordered.insert(d.to_string(), serde_json::json!(list));
+    }
+    serde_json::to_string(&ordered).unwrap_or_else(|_| "{}".into())
+}
+
 pub fn groups_for<'a>(plan: &'a HashMap<String, Vec<String>>, day: &str) -> Vec<String> {
     plan.iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(day))

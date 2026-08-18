@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import { api, type Channel, type Source } from "./api";
 import { editorHtml, mountEditor } from "./editor";
 import { epgHtml, mountEpg } from "./epg";
@@ -6,6 +5,7 @@ import { logoHtml, mountLogo } from "./logo";
 import { auditHtml, mountAudit } from "./audit";
 import { outputHtml, mountOutput } from "./output";
 import { tunerHtml, mountTuner } from "./tuner";
+import { settingsHtml, mountSettings } from "./settings";
 
 export type NavId =
   | "audit"
@@ -99,6 +99,7 @@ export function mountShell(root: HTMLElement): void {
     if (id === "autoaudit") void mountAudit(page, showToast);
     if (id === "output") void mountOutput(page, showToast);
     if (id === "tuner") void mountTuner(page, showToast);
+    if (id === "settings") void mountSettings(page, showToast);
   };
 
   root.querySelectorAll<HTMLButtonElement>("[data-nav]").forEach((btn) => {
@@ -116,19 +117,6 @@ export function mountShell(root: HTMLElement): void {
         page.dispatchEvent(new CustomEvent("studio-search", { detail: search.value }));
       }
     }, 200);
-  });
-
-  root.addEventListener("click", async (ev) => {
-    const t = ev.target as HTMLElement;
-    if (t.id === "save-settings") showToast("Settings saved.");
-    if (t.id === "detect-tools") {
-      try {
-        const n = await invoke<number>("detect_bundled_tools");
-        showToast(`Detected ${n} bundled tool path(s).`);
-      } catch (e) {
-        showToast(String(e));
-      }
-    }
   });
 
   render("audit");
@@ -364,121 +352,4 @@ function pageHtml(id: NavId): string {
     case "settings":
       return settingsHtml();
   }
-}
-
-function settingsHtml(): string {
-  return `
-    <div class="settings-head">
-      <div>
-        <h1 class="page-title">Settings</h1>
-        <p class="page-sub">epg.monster studio · dark theme · bundled tools</p>
-      </div>
-      <div>
-        <button id="detect-tools">Detect bundled tools</button>
-        <button class="accent" id="save-settings">Save</button>
-      </div>
-    </div>
-    <div class="settings-grid">
-      <section class="tile">
-        <h2>Players</h2>
-        <p class="hint">External player used from Playlist Editor and Stream.</p>
-        <div class="field"><label>Default player</label>
-          <select><option>mpv</option><option>VLC</option></select></div>
-        <div class="field"><label>mpv.exe path</label><input /></div>
-        <div class="field"><label>vlc.exe path</label><input /></div>
-      </section>
-      <section class="tile">
-        <h2>Stream Audit</h2>
-        <p class="hint">ffmpeg / ffprobe used for probes and the HDHomeRun remux.</p>
-        <div class="field"><label>ffmpeg.exe path</label><input /></div>
-        <div class="field"><label>ffprobe.exe path</label><input /></div>
-        <div class="field"><label>Delay between probes (ms)</label><input type="number" value="6000" /></div>
-        <div class="field"><label>Probe timeout (ms)</label><input type="number" value="15000" /></div>
-        <label class="check"><input type="checkbox" checked /> Auto-swap visible stream to working backup on fail</label>
-        <label class="check"><input type="checkbox" checked /> Pause auto-audit while external player is active</label>
-      </section>
-      <section class="tile">
-        <h2>Guide</h2>
-        <p class="hint">XMLTV catalog. Built from tvg-ids in this file.</p>
-        <div class="field"><label>Default User-Agent for URL sources</label><input value="epg.monster-studio/v1.0-beta" /></div>
-        <div class="field"><label>XMLTV guide URL (epg.monster)</label>
-          <textarea>https://epg.monster/epg.xml</textarea></div>
-      </section>
-      <section class="tile">
-        <h2>my.epg.monster</h2>
-        <p class="hint">Access key from Keys. Upload sends curated tvg-ids only — never stream URLs.</p>
-        <div class="field"><label>Email</label><input placeholder="you@example.com" /></div>
-        <div class="field"><label>Access key (epgm_…)</label><input type="password" /></div>
-        <div class="field"><label>API base</label><input placeholder="https://epg.monster" /></div>
-        <div><button>Test key</button> <button class="accent">Upload channels.json</button></div>
-      </section>
-      <section class="tile" style="grid-column:1/-1">
-        <h2>TV Tuner</h2>
-        <p class="hint">IPTV is on for new installs. Plex, Jellyfin, and Emby stay off until you enable them. Ports 8080–8083. Start/stop is on the TV Tuner panel.</p>
-        <div class="settings-grid">
-          ${tunerCard("Plex", 8080, false)}
-          ${tunerCard("Jellyfin", 8081, false, true)}
-          ${tunerCard("Emby", 8082, false)}
-          ${tunerCard("IPTV (TiviMate / Smarters)", 8083, true, false, true)}
-        </div>
-        <label class="check"><input type="checkbox" checked /> Advertise tuners on the network (HDHomeRun UDP 65001 + SSDP). Turn on Allow LAN if Plex is another PC.</label>
-      </section>
-      <section class="tile">
-        <h2>Remux</h2>
-        <p class="hint">Spawn ffmpeg or VLC, buffer MPEG-TS, then serve Plex. MPEG2+AC3 is the Plex-safe default. VLC is always copy-to-TS.</p>
-        <div class="field"><label>Engine</label><select><option>ffmpeg</option><option>VLC</option></select></div>
-        <div class="field"><label>ffmpeg profile</label>
-          <select><option>Plex MPEG2 + AC3 (recommended)</option><option>Threadfin copy (H264 + AAC stereo)</option></select></div>
-        <div class="field"><label>Buffer before send (KB)</label><input type="number" value="4096" /></div>
-      </section>
-      <section class="tile">
-        <h2>Logos</h2>
-        <p class="hint">Local PNG pack and optional hosting on the tuner.</p>
-        <div class="field"><label>Logo save directory</label><input placeholder="%LocalAppData%\\epg.monster-studio\\logo" /></div>
-        <label class="check"><input type="checkbox" /> Host the logos folder on the tuner</label>
-        <label class="check"><input type="checkbox" /> Use local logos in tuner playlists and EPG</label>
-      </section>
-      <section class="tile">
-        <h2>Weekly Stream Audit</h2>
-        <p class="hint">Group names, comma-separated. Stream Audit → Run today's groups. Skip groups with no match.</p>
-        <div class="settings-grid">
-          <div class="field"><label>Monday</label><input /></div>
-          <div class="field"><label>Tuesday</label><input /></div>
-          <div class="field"><label>Wednesday</label><input /></div>
-          <div class="field"><label>Thursday</label><input /></div>
-          <div class="field"><label>Friday</label><input /></div>
-          <div class="field"><label>Saturday</label><input /></div>
-          <div class="field" style="grid-column:1/-1"><label>Sunday</label><input /></div>
-        </div>
-        <label class="check"><input type="checkbox" /> Remind me when today's groups have not run (does not start a probe)</label>
-        <label class="check"><input type="checkbox" /> Fail fully black screens (ffmpeg blackdetect)</label>
-      </section>
-      <section class="tile">
-        <h2>Screen matches</h2>
-        <p class="hint">After a stream decodes, hash one frame against these stills (offline / slate cards).</p>
-        <div><button>Add screen…</button> <button>Remove selected</button> <button>Open folder</button></div>
-        <h2 style="margin-top:16px">Diagnostics</h2>
-        <p class="hint">Daily logs and crash reports live under local app data. A crash opens a report on the next launch.</p>
-        <div><button>Open logs folder</button> <button>Open crash reports</button></div>
-        <div class="field"><label>Optional Python path</label><input placeholder="python.exe" /></div>
-      </section>
-    </div>
-  `;
-}
-
-function tunerCard(title: string, port: number, enabled: boolean, downspiral = false, iptv = false): string {
-  return `
-    <section class="tile">
-      <label class="check"><input type="checkbox" ${enabled ? "checked" : ""} /> ${title}</label>
-      <div class="field"><label>Friendly name</label><input /></div>
-      <div class="field"><label>Port</label><input type="number" value="${port}" /></div>
-      <div class="field"><label>Tuner count</label><input type="number" value="2" /></div>
-      <label class="check"><input type="checkbox" /> Allow LAN</label>
-      ${downspiral ? `<label class="check"><input type="checkbox" /> Downspiral — one playlist + guide per group (switch lists without changing Jellyfin profiles)</label>` : ""}
-      ${iptv ? `
-        <label class="check"><input type="checkbox" checked /> Remux IPTV playlist through Studio (MPEG-TS)</label>
-        <div class="field"><label>Tuner EPG for IPTV players</label>
-          <select><option>Local Studio guide (/guide.xml)</option><option>my.epg.monster curated feed</option></select></div>` : ""}
-    </section>
-  `;
 }

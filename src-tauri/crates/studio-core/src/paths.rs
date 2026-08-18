@@ -45,6 +45,28 @@ pub fn audit_process_db_path() -> PathBuf {
     app_data_directory().join("auditprocess.db")
 }
 
+pub fn logs_directory() -> PathBuf {
+    let dir = app_data_directory().join("logs");
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+pub fn crashes_directory() -> PathBuf {
+    let dir = logs_directory().join("crashes");
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+pub fn current_log_path() -> PathBuf {
+    let now = time::OffsetDateTime::now_utc();
+    logs_directory().join(format!(
+        "{:04}-{:02}-{:02}.log",
+        now.year(),
+        now.month() as u8,
+        now.day()
+    ))
+}
+
 pub fn offline_slates_directory() -> PathBuf {
     let dir = app_data_directory().join("offline-slates");
     let _ = fs::create_dir_all(&dir);

@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use studio_core::models::{
     ChannelEntry, EpgSuggestion, ManagedChannel, NowPlaying, PlaylistSource, StreamVariant,
 };
-use studio_core::paths::{app_data_directory, database_path};
+use studio_core::paths::{
+    app_data_directory, crashes_directory, current_log_path, database_path, logs_directory,
+    offline_slates_directory,
+};
 use studio_core::audit;
 use studio_core::curation;
 use studio_core::epg;
@@ -19,7 +22,9 @@ use studio_core::models::{CatalogEntry, EpgAuditRow};
 use studio_core::player;
 use studio_core::settings::AppSettings;
 use studio_core::store::SqliteStore;
-use studio_core::tools::detect_bundled;
+use studio_core::tools::{
+    default_ffmpeg_path, default_ffprobe_path, default_mpv_path, default_vlc_path, detect_bundled,
+};
 use studio_core::{DISPLAY_NAME, VERSION};
 use studio_tuner::manager::{self, TunerManager};
 use studio_tuner::host::TunerSnapshot;
@@ -740,6 +745,130 @@ fn save_settings(state: tauri::State<AppState>, settings: AppSettings) -> Result
         .map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolPathsDto {
+    mpv: String,
+    vlc: String,
+    ffmpeg: String,
+    ffprobe: String,
+}
+
+#[tauri::command]
+fn detect_tool_paths(app: tauri::AppHandle) -> ToolPathsDto {
+    let root = app_root(&app);
+    ToolPathsDto {
+        mpv: default_mpv_path(&root).to_string_lossy().into_owned(),
+        vlc: default_vlc_path().to_string_lossy().into_owned(),
+        ffmpeg: default_ffmpeg_path(&root).to_string_lossy().into_owned(),
+        ffprobe: default_ffprobe_path(&root).to_string_lossy().into_owned(),
+    }
+}
+
+#[tauri::command]
+fn members_ping(api_base: String, access_key: String) -> members::MemberPingResult {
+    members::ping(&api_base, &access_key, Some(VERSION))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsFolders {
+    logs: String,
+    crashes: String,
+    slates: String,
+    current_log: String,
+    logo_dir: String,
+}
+
+#[tauri::command]
+fn settings_folders() -> SettingsFolders {
+    SettingsFolders {
+        logs: logs_directory().to_string_lossy().into_owned(),
+        crashes: crashes_directory().to_string_lossy().into_owned(),
+        slates: offline_slates_directory().to_string_lossy().into_owned(),
+        current_log: current_log_path().to_string_lossy().into_owned(),
+        logo_dir: logo::default_logo_dir().to_string_lossy().into_owned(),
+    }
+}
+
+#[tauri::command]
+fn list_slates() -> Vec<String> {
+    let dir = offline_slates_directory();
+    let mut names = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            let ext = p
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
+                if let Some(n) = p.file_name().and_then(|s| s.to_str()) {
+                    names.push(n.to_string());
+                }
+            }
+        }
+    }
+    names.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+    names
+}
+
+#[tauri::command]
+fn add_slate(app: tauri::AppHandle) -> Result<String, String> {
+    let picked = tauri_plugin_dialog::DialogExt::dialog(&app)
+        .file()
+        .add_filter("Images", &["png", "jpg", "jpeg"])
+        .blocking_pick_file();
+    let Some(file) = picked else {
+        return Ok("cancelled".into());
+    };
+    let src = file.into_path().map_err(|e| e.to_string())?;
+    let name = src
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "invalid file".to_string())?;
+    let dest = offline_slates_directory().join(name);
+    std::fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+    Ok(name.to_string())
+}
+
+#[tauri::command]
+fn remove_slate(name: String) -> Result<(), String> {
+    let dest = offline_slates_directory().join(name);
+    if dest.is_file() {
+        std::fs::remove_file(dest).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_folder(path: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(path);
+    if let Some(dir) = if p.is_dir() {
+        Some(p.clone())
+    } else {
+        p.parent().map(|d| d.to_path_buf())
+    } {
+        let _ = std::fs::create_dir_all(&dir);
+        #[cfg(windows)]
+        {
+            std::process::Command::new("explorer")
+                .arg(dir)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        #[cfg(not(windows))]
+        {
+            std::process::Command::new("xdg-open")
+                .arg(dir)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn epg_catalog_count(state: tauri::State<AppState>) -> Result<i32, String> {
     lock_store(&state)?.catalog_count().map_err(|e| e.to_string())
@@ -1336,6 +1465,13 @@ pub fn run() {
             clear_managed,
             load_settings,
             save_settings,
+            detect_tool_paths,
+            members_ping,
+            settings_folders,
+            list_slates,
+            add_slate,
+            remove_slate,
+            open_folder,
             epg_catalog_count,
             epg_guide_url,
             fetch_epg_catalog,
