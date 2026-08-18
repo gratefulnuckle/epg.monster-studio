@@ -166,56 +166,141 @@ fn get_studio_info(state: tauri::State<AppState>) -> Result<StudioInfoDto, Strin
     })
 }
 
+fn splash_shorten(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    if s.len() > 52 && (s.contains('\\') || s.contains('/')) {
+        return std::path::Path::new(s)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(s)
+            .to_string();
+    }
+    if s.len() <= 56 {
+        s.to_string()
+    } else {
+        format!("…{}", &s[s.len() - 52..])
+    }
+}
+
+fn splash_check_path(label: &str, path: &std::path::Path, required: bool) -> SplashCheck {
+    if path.is_file() {
+        SplashCheck {
+            label: label.into(),
+            ok: true,
+            detail: splash_shorten(&path.display().to_string()),
+        }
+    } else if required {
+        SplashCheck {
+            label: label.into(),
+            ok: false,
+            detail: "Not found — set in Settings".into(),
+        }
+    } else {
+        SplashCheck {
+            label: label.into(),
+            ok: true,
+            detail: "Not found (optional)".into(),
+        }
+    }
+}
+
 #[tauri::command]
 fn splash_checks(app: tauri::AppHandle, state: tauri::State<AppState>) -> Vec<SplashCheck> {
     let root = app_root(&app);
-    let found = detect_bundled(&root);
-    let has = |name: &str| found.iter().any(|(n, _)| n == name);
-    let store = lock_store(&state).ok();
-    let sources = store
-        .as_ref()
-        .and_then(|s| s.list_sources().ok())
-        .map(|s| s.len())
-        .unwrap_or(0);
-    let managed = store
-        .as_ref()
-        .and_then(|s| s.managed_count().ok())
-        .unwrap_or(0);
+    let settings = lock_store(&state)
+        .ok()
+        .and_then(|s| s.load_settings().ok())
+        .unwrap_or_default();
+    let pick = |stored: &str, fallback: std::path::PathBuf| {
+        let t = stored.trim();
+        if t.is_empty() {
+            fallback
+        } else {
+            std::path::PathBuf::from(t)
+        }
+    };
+    let data = app_data_directory();
     let db = database_path();
+    let cache = data.join("cache");
+    let _ = std::fs::create_dir_all(&data);
+    let _ = std::fs::create_dir_all(&cache);
     vec![
         SplashCheck {
-            label: "ffmpeg".into(),
-            ok: has("ffmpeg"),
-            detail: if has("ffmpeg") {
-                "OK".into()
-            } else {
-                "not found — Detect bundled tools".into()
-            },
+            label: "Application data folder".into(),
+            ok: data.is_dir(),
+            detail: splash_shorten(&data.display().to_string()),
         },
         SplashCheck {
-            label: "ffprobe".into(),
-            ok: has("ffprobe"),
-            detail: if has("ffprobe") {
-                "OK".into()
-            } else {
-                "not found".into()
-            },
+            label: "SQLite database".into(),
+            ok: db.is_file(),
+            detail: splash_shorten(&db.display().to_string()),
         },
+        splash_check_path(
+            "mpv player",
+            &pick(&settings.mpv_path, default_mpv_path(&root)),
+            true,
+        ),
+        splash_check_path(
+            "ffmpeg (auto-audit)",
+            &pick(&settings.ffmpeg_path, default_ffmpeg_path(&root)),
+            true,
+        ),
+        splash_check_path(
+            "ffprobe",
+            &pick(&settings.ffprobe_path, default_ffprobe_path(&root)),
+            false,
+        ),
+        splash_check_path("VLC (optional)", &pick(&settings.vlc_path, default_vlc_path()), false),
         SplashCheck {
-            label: "mpv".into(),
-            ok: has("mpv"),
-            detail: if has("mpv") {
-                "OK".into()
-            } else {
-                "not found".into()
-            },
-        },
-        SplashCheck {
-            label: "Workspace".into(),
-            ok: db.exists(),
-            detail: format!("{sources} sources · {managed} curated · {}", db.display()),
+            label: "Playlist cache folder".into(),
+            ok: cache.is_dir(),
+            detail: splash_shorten(&cache.display().to_string()),
         },
     ]
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SplashEpgStatus {
+    catalog: i32,
+    programmes: i32,
+    cached: bool,
+}
+
+#[tauri::command]
+fn splash_epg_status(state: tauri::State<AppState>) -> SplashEpgStatus {
+    let store = lock_store(&state).ok();
+    let catalog = store
+        .as_ref()
+        .and_then(|s| s.catalog_count().ok())
+        .unwrap_or(0);
+    let programmes = store
+        .as_ref()
+        .and_then(|s| s.programme_count().ok())
+        .unwrap_or(0);
+    SplashEpgStatus {
+        catalog,
+        programmes,
+        cached: catalog > 0,
+    }
+}
+
+#[tauri::command]
+fn promote_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    let w = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window missing".to_string())?;
+    let _ = w.set_decorations(true);
+    let _ = w.set_resizable(true);
+    let _ = w.set_minimizable(true);
+    let _ = w.set_maximizable(true);
+    let _ = w.set_min_size(Some(tauri::LogicalSize::new(960.0, 640.0)));
+    let _ = w.set_size(tauri::LogicalSize::new(1280.0, 800.0));
+    let _ = w.center();
+    let _ = w.set_focus();
+    Ok(())
 }
 
 #[tauri::command]
@@ -1596,6 +1681,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_studio_info,
             splash_checks,
+            splash_epg_status,
+            promote_main_window,
             detect_bundled_tools,
             list_sources,
             list_groups,

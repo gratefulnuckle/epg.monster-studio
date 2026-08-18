@@ -13,11 +13,15 @@
     "withGlobalTauri": false,
     "windows": [
       {
+        "label": "main",
         "title": "epg.monster studio",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 960,
-        "minHeight": 640,
+        "width": 560,
+        "height": 500,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "decorations": false,
+        "center": true,
         "backgroundColor": "#0C0C10"
       }
     ],

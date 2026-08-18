@@ -914,6 +914,12 @@ impl SqliteStore {
             .query_row("SELECT COUNT(*) FROM epg_catalog", [], |r| r.get(0))?)
     }
 
+    pub fn programme_count(&self) -> Result<i32, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM epg_programmes", [], |r| r.get(0))?)
+    }
+
     pub fn list_all_variants(&self) -> Result<Vec<StreamVariant>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, managed_channel_id, url, label, source_entry_id, visibility, priority,
