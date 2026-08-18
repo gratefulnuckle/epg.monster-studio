@@ -327,6 +327,7 @@ pub fn snapshot_from_settings(
         remux_profile: settings.remux_profile.clone(),
         remux_buffer_bytes: remux::clamp_buffer_kb(settings.remux_buffer_kb) * 1024,
         user_agent: settings.default_user_agent.clone(),
+        variant_headers: HashMap::new(),
         note_failover: None,
     }
 }

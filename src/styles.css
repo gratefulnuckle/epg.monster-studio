@@ -660,14 +660,49 @@ textarea {
   flex: 1;
 }
 
+.logo-slot {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  background: #1a1a22;
+  overflow: hidden;
+}
+
+.logo-slot img {
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+  display: block;
+}
+
+.logo-broken {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  color: #e57373;
+  font-family: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+  font-size: 18px;
+}
+
+.logo-slot .tvg-check {
+  position: absolute;
+  right: 1px;
+  bottom: 0;
+}
+
 .chan-pick {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
   text-align: left;
   background: transparent;
   border: 0;
   border-radius: 0;
+  padding: 4px 2px;
 }
 
 .chan-pick.active {

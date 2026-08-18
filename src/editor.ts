@@ -186,11 +186,21 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       const row = document.createElement("button");
       row.className = "chan-pick" + (selected?.id === c.id ? " active" : "");
       row.innerHTML = `
-        <span class="logo-slot">${c.hasEpgMatch ? `<span class="tvg-check">✓</span>` : ""}</span>
+        <span class="logo-slot">
+          ${c.tvgLogo ? `<img src="${esc(c.tvgLogo)}" alt="" />` : `<span class="logo-broken">&#xE7BA;</span>`}
+          ${c.hasEpgMatch ? `<span class="tvg-check">✓</span>` : ""}
+        </span>
         <span>
           <span class="chan-name">${esc(c.name)}</span>
           <span class="chan-sub">${esc(c.tvgId ?? "")}</span>
         </span>`;
+      const img = row.querySelector("img");
+      img?.addEventListener("error", () => {
+        const slot = row.querySelector(".logo-slot");
+        if (!slot) return;
+        const check = slot.querySelector(".tvg-check")?.outerHTML ?? "";
+        slot.innerHTML = `<span class="logo-broken">&#xE7BA;</span>${check}`;
+      });
       row.addEventListener("click", () => void select(c.id));
       list.appendChild(row);
     }

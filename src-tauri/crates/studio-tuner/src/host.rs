@@ -45,6 +45,7 @@ pub struct TunerSnapshot {
     pub remux_profile: String,
     pub remux_buffer_bytes: i32,
     pub user_agent: String,
+    pub variant_headers: HashMap<String, Vec<(String, String)>>,
     pub note_failover: Option<std::sync::Arc<dyn Fn(&ManagedChannel, &StreamVariant) + Send + Sync>>,
 }
 
@@ -66,6 +67,7 @@ impl Default for TunerSnapshot {
             remux_profile: "mpeg2_ac3".into(),
             remux_buffer_bytes: remux::DEFAULT_PREROLL_BYTES as i32,
             user_agent: studio_core::USER_AGENT.into(),
+            variant_headers: HashMap::new(),
             note_failover: None,
         }
     }
@@ -390,13 +392,14 @@ fn stream_channel(
             headers_sent: &mut headers_sent,
             bytes: &mut bytes,
         };
+        let headers = remux_snap.variant_headers.get(&variant.id);
         let stop = remux::copy(
             engine,
             profile,
             &remux_snap.ffmpeg_path,
             &remux_snap.vlc_path,
             &variant.url,
-            None,
+            headers.map(|h| h.as_slice()),
             &remux_snap.user_agent,
             preroll,
             &mut dest,

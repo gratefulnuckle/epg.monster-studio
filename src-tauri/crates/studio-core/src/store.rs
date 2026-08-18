@@ -764,6 +764,42 @@ impl SqliteStore {
         Ok(v)
     }
 
+    pub fn headers_for_entry(&self, entry_id: &str) -> Vec<(String, String)> {
+        let json: String = self
+            .conn
+            .query_row(
+                "SELECT s.headers_json FROM channel_entries e
+                 JOIN sources s ON s.id = e.source_id
+                 WHERE e.id = ?1",
+                params![entry_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        serde_json::from_str::<std::collections::BTreeMap<String, String>>(&json)
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    }
+
+    pub fn headers_for_channels(
+        &self,
+        channels: &[ManagedChannel],
+    ) -> std::collections::HashMap<String, Vec<(String, String)>> {
+        let mut map = std::collections::HashMap::new();
+        for ch in channels {
+            for v in &ch.variants {
+                let Some(id) = v.source_entry_id.as_deref().filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                let headers = self.headers_for_entry(id);
+                if !headers.is_empty() {
+                    map.insert(v.id.clone(), headers);
+                }
+            }
+        }
+        map
+    }
+
     pub fn add_backup_from_entry(
         &self,
         managed_id: &str,

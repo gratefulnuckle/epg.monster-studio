@@ -297,7 +297,7 @@ fn promote_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let _ = w.set_minimizable(true);
     let _ = w.set_maximizable(true);
     let _ = w.set_min_size(Some(tauri::LogicalSize::new(960.0, 640.0)));
-    let _ = w.set_size(tauri::LogicalSize::new(1280.0, 800.0));
+    let _ = w.set_size(tauri::LogicalSize::new(1400.0, 900.0));
     let _ = w.center();
     let _ = w.set_focus();
     Ok(())
@@ -1481,7 +1481,9 @@ fn make_snapshot(store: &SqliteStore) -> TunerSnapshot {
     let programmes = store
         .list_programmes(&ids, "1970-01-01T00:00:00Z", "2099-01-01T00:00:00Z")
         .unwrap_or_default();
-    manager::snapshot_from_settings(channels, programmes, &settings)
+    let mut snap = manager::snapshot_from_settings(channels, programmes, &settings);
+    snap.variant_headers = store.headers_for_channels(&snap.channels);
+    snap
 }
 
 fn persist_settings(state: &tauri::State<AppState>, settings: &AppSettings) -> Result<(), String> {
