@@ -20,14 +20,14 @@ export type NavId =
   | "tuner"
   | "settings";
 
-const NAV: { id: NavId; label: string }[] = [
-  { id: "audit", label: "Add Sources" },
-  { id: "editor", label: "Playlist Editor" },
-  { id: "epg", label: "EPG Audit" },
-  { id: "logoaudit", label: "Logo Audit" },
-  { id: "autoaudit", label: "Stream Audit" },
-  { id: "output", label: "Managed Output" },
-  { id: "tuner", label: "TV Tuner" },
+const NAV: { id: NavId; label: string; icon: string }[] = [
+  { id: "audit", label: "Add Sources", icon: "\uE8A5" },
+  { id: "editor", label: "Playlist Editor", icon: "\uE70F" },
+  { id: "epg", label: "EPG Audit", icon: "\uE787" },
+  { id: "logoaudit", label: "Logo Audit", icon: "\uE91B" },
+  { id: "autoaudit", label: "Stream Audit", icon: "\uE895" },
+  { id: "output", label: "Managed Output", icon: "\uE8B7" },
+  { id: "tuner", label: "TV Tuner", icon: "\uE7F4" },
 ];
 
 const SEARCH_PAGES: NavId[] = ["audit", "editor", "output"];
@@ -36,10 +36,16 @@ export function mountShell(root: HTMLElement): void {
   root.innerHTML = `
     <div class="shell">
       <header class="titlebar">
-        <div class="titlebar-side titlebar-left" data-tauri-drag-region>
-          <span class="brand">epg.monster studio</span>
+        <div class="titlebar-side titlebar-left">
+          <button type="button" class="pane-toggle" id="pane-toggle" title="Navigation" aria-label="Navigation">&#xE700;</button>
+          <div class="titlebar-drag" data-tauri-drag-region>
+            <span class="brand">epg.monster studio</span>
+          </div>
         </div>
-        <input class="search" id="search" placeholder="Search name, group, tvg-id, URL…" />
+        <div class="search-wrap" id="search-wrap">
+          <input class="search" id="search" placeholder="Search name, group, tvg-id, URL…" />
+          <span class="search-icon" aria-hidden="true">&#xE721;</span>
+        </div>
         <div class="titlebar-side titlebar-right">
           <div class="titlebar-drag titlebar-spacer" data-tauri-drag-region></div>
           <div class="caption">
@@ -56,7 +62,7 @@ export function mountShell(root: HTMLElement): void {
           </button>
           <div class="nav-items" id="nav-items"></div>
           <div class="nav-footer">
-            <button class="nav-item" data-nav="settings">Settings</button>
+              <button class="nav-item" data-nav="settings"><span class="nav-icon">&#xE713;</span><span class="nav-label">Settings</span></button>
           </div>
         </aside>
         <main class="page" id="page"></main>
@@ -81,12 +87,15 @@ export function mountShell(root: HTMLElement): void {
     const b = document.createElement("button");
     b.className = "nav-item";
     b.dataset.nav = item.id;
-    b.textContent = item.label;
+    b.innerHTML = `<span class="nav-icon">${item.icon}</span><span class="nav-label"></span>`;
+    b.querySelector(".nav-label")!.textContent = item.label;
     items.appendChild(b);
   }
 
   const page = root.querySelector<HTMLElement>("#page")!;
   const search = root.querySelector<HTMLInputElement>("#search")!;
+  const searchWrap = root.querySelector<HTMLElement>("#search-wrap")!;
+  const workspace = root.querySelector<HTMLElement>(".workspace")!;
   const toast = root.querySelector<HTMLElement>("#toast")!;
   const aboutDlg = root.querySelector<HTMLElement>("#about-dlg")!;
 
@@ -103,7 +112,8 @@ export function mountShell(root: HTMLElement): void {
     root.querySelectorAll(".nav-item").forEach((el) => {
       el.classList.toggle("active", (el as HTMLElement).dataset.nav === id);
     });
-    search.classList.toggle("hidden", !SEARCH_PAGES.includes(id));
+    searchWrap.classList.toggle("hidden", !SEARCH_PAGES.includes(id));
+    if (!SEARCH_PAGES.includes(id)) search.value = "";
     page.innerHTML = pageHtml(id);
     if (id === "audit") void mountSources(page, showToast);
     if (id === "editor") void mountEditor(page, showToast);
@@ -121,6 +131,9 @@ export function mountShell(root: HTMLElement): void {
 
   root.querySelector("#about")!.addEventListener("click", () => aboutDlg.classList.add("open"));
   root.querySelector("#about-close")!.addEventListener("click", () => aboutDlg.classList.remove("open"));
+  root.querySelector("#pane-toggle")!.addEventListener("click", () => {
+    workspace.classList.toggle("pane-closed");
+  });
   wireCaptionButtons(root);
 
   let searchTimer = 0;
@@ -130,7 +143,14 @@ export function mountShell(root: HTMLElement): void {
       if (SEARCH_PAGES.includes(current)) {
         page.dispatchEvent(new CustomEvent("studio-search", { detail: search.value }));
       }
-    }, 200);
+    }, 300);
+  });
+  search.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter") return;
+    window.clearTimeout(searchTimer);
+    if (SEARCH_PAGES.includes(current)) {
+      page.dispatchEvent(new CustomEvent("studio-search", { detail: search.value }));
+    }
   });
 
   render("audit");
