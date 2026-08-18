@@ -1,0 +1,18 @@
+# Tauri / Node / Rust (for when implementation starts)
+node_modules/
+dist/
+src-tauri/target/
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+Thumbs.db
+.env
+.env.*
+logs/
+_tooling-check/
+
+# Bundled binaries (fetched at publish, same as C# repo)
+tools/ffmpeg/
+tools/mpv/
+!tools/README.md

@@ -1,0 +1,7 @@
+schema: spec-driven
+context: |
+  This repo is a 1:1 remake of gratefulnuckle/epg.monster-studio (C# WinUI 3 v1.0-beta)
+  as Rust + TypeScript + Tauri v2. The project name is epg.monster-studio(tauri).
+  The window title stays "epg.monster studio". Never invent features, never simplify
+  controls, never restyle tokens. If unsure, read the C# WinUI page and Core service.
+  GPL-3.0. Do not log access keys or provider stream URLs.
