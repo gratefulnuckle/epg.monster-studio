@@ -126,12 +126,7 @@ textarea {
 
 .titlebar-spacer {
   flex: 1;
-}
-
-.titlebar .brand {
-  opacity: 0.85;
-  font-weight: 600;
-  white-space: nowrap;
+  align-self: stretch;
 }
 
 .search-wrap {

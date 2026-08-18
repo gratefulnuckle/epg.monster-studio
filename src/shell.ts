@@ -38,9 +38,7 @@ export function mountShell(root: HTMLElement): void {
       <header class="titlebar">
         <div class="titlebar-side titlebar-left">
           <button type="button" class="pane-toggle" id="pane-toggle" title="Navigation" aria-label="Navigation">&#xE700;</button>
-          <div class="titlebar-drag" data-tauri-drag-region>
-            <span class="brand">epg.monster studio</span>
-          </div>
+          <div class="titlebar-drag titlebar-spacer" data-tauri-drag-region></div>
         </div>
         <div class="search-wrap" id="search-wrap">
           <input class="search" id="search" placeholder="Search name, group, tvg-id, URL…" />
