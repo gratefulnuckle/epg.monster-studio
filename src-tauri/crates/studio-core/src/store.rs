@@ -601,6 +601,8 @@ impl SqliteStore {
                 origin_tvg_id: None,
                 visibility: "visible".into(),
                 priority: 0,
+                last_audit_ok: None,
+                last_audit_at: None,
             })?;
             by_gn.insert(gn, ch.id);
             added += 1;
@@ -634,7 +636,7 @@ impl SqliteStore {
     pub fn get_variants(&self, managed_id: &str) -> Result<Vec<StreamVariant>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, managed_channel_id, url, label, source_entry_id, visibility, priority,
-                    origin_name, origin_tvg_id
+                    origin_name, origin_tvg_id, last_audit_ok, last_audit_at
              FROM stream_variants WHERE managed_channel_id = ?1 ORDER BY priority, label",
         )?;
         let rows = stmt.query_map(params![managed_id], read_variant)?;
@@ -709,6 +711,8 @@ impl SqliteStore {
             origin_tvg_id: None,
             visibility: if max < 0 { "visible" } else { "hidden_backup" }.into(),
             priority: max + 1,
+            last_audit_ok: None,
+            last_audit_at: None,
         };
         self.upsert_variant(&v)?;
         Ok(v)
@@ -748,6 +752,8 @@ impl SqliteStore {
             origin_tvg_id: entry.tvg_id,
             visibility: "visible".into(),
             priority: 0,
+            last_audit_ok: None,
+            last_audit_at: None,
         };
         self.upsert_variant(&v)?;
         Ok(self.get_managed(&ch.id)?.unwrap())
@@ -911,7 +917,7 @@ impl SqliteStore {
     pub fn list_all_variants(&self) -> Result<Vec<StreamVariant>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, managed_channel_id, url, label, source_entry_id, visibility, priority,
-                    origin_name, origin_tvg_id
+                    origin_name, origin_tvg_id, last_audit_ok, last_audit_at
              FROM stream_variants ORDER BY managed_channel_id, priority",
         )?;
         let rows = stmt.query_map([], read_variant)?;
@@ -921,7 +927,7 @@ impl SqliteStore {
     pub fn get_variant(&self, id: &str) -> Result<Option<StreamVariant>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, managed_channel_id, url, label, source_entry_id, visibility, priority,
-                    origin_name, origin_tvg_id
+                    origin_name, origin_tvg_id, last_audit_ok, last_audit_at
              FROM stream_variants WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], read_variant)?;
@@ -1094,6 +1100,18 @@ impl SqliteStore {
         tx.commit()?;
         Ok(true)
     }
+
+    pub fn pending_swap_count(&self, limit: i32) -> Result<i32, StoreError> {
+        let n: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT id FROM swap_undo_log WHERE undone_at IS NULL
+                ORDER BY created_at DESC LIMIT ?1
+             )",
+            params![limit],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
 }
 
 fn read_managed(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedChannel> {
@@ -1124,6 +1142,12 @@ fn read_variant(row: &rusqlite::Row<'_>) -> rusqlite::Result<StreamVariant> {
         priority: row.get(6)?,
         origin_name: row.get(7)?,
         origin_tvg_id: row.get(8)?,
+        last_audit_ok: row
+            .get::<_, Option<i32>>(9)
+            .ok()
+            .flatten()
+            .map(|n| n != 0),
+        last_audit_at: row.get(10).ok().flatten(),
     })
 }
 

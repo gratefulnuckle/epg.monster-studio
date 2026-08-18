@@ -118,6 +118,8 @@ mod tests {
                     origin_tvg_id: None,
                     visibility: "visible".into(),
                     priority: 0,
+                    last_audit_ok: None,
+                    last_audit_at: None,
                 },
                 StreamVariant {
                     id: "v2".into(),
@@ -129,6 +131,8 @@ mod tests {
                     origin_tvg_id: None,
                     visibility: "hidden_backup".into(),
                     priority: 1,
+                    last_audit_ok: None,
+                    last_audit_at: None,
                 },
             ],
             has_epg_match: false,

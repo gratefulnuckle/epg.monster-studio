@@ -4,6 +4,7 @@ import { editorHtml, mountEditor } from "./editor";
 import { epgHtml, mountEpg } from "./epg";
 import { logoHtml, mountLogo } from "./logo";
 import { auditHtml, mountAudit } from "./audit";
+import { outputHtml, mountOutput } from "./output";
 
 export type NavId =
   | "audit"
@@ -95,6 +96,7 @@ export function mountShell(root: HTMLElement): void {
     if (id === "epg") void mountEpg(page, showToast);
     if (id === "logoaudit") void mountLogo(page, showToast);
     if (id === "autoaudit") void mountAudit(page, showToast);
+    if (id === "output") void mountOutput(page, showToast);
   };
 
   root.querySelectorAll<HTMLButtonElement>("[data-nav]").forEach((btn) => {
@@ -108,7 +110,7 @@ export function mountShell(root: HTMLElement): void {
   search.addEventListener("input", () => {
     window.clearTimeout(searchTimer);
     searchTimer = window.setTimeout(() => {
-      if (current === "audit") {
+      if (SEARCH_PAGES.includes(current)) {
         page.dispatchEvent(new CustomEvent("studio-search", { detail: search.value }));
       }
     }, 200);
@@ -354,9 +356,7 @@ function pageHtml(id: NavId): string {
     case "autoaudit":
       return auditHtml();
     case "output":
-      return `
-        <h1 class="page-title">Managed Output</h1>
-        <p class="page-sub">Overview of visible vs hidden streams. Export. Undo last swap. Tuner lineup.</p>`;
+      return outputHtml();
     case "tuner":
       return `
         <h1 class="page-title">TV Tuner</h1>

@@ -51,6 +51,10 @@ pub struct StreamVariant {
     pub origin_tvg_id: Option<String>,
     pub visibility: String,
     pub priority: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_audit_ok: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_audit_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -9,8 +9,11 @@ use studio_core::models::{
 };
 use studio_core::paths::{app_data_directory, database_path};
 use studio_core::audit;
+use studio_core::curation;
 use studio_core::epg;
 use studio_core::logo;
+use studio_core::lineup;
+use studio_core::members;
 use studio_core::export::{export_all, export_visible_only};
 use studio_core::models::{CatalogEntry, EpgAuditRow};
 use studio_core::player;
@@ -439,10 +442,15 @@ fn export_managed(
     state: tauri::State<AppState>,
     include_backups: bool,
 ) -> Result<String, String> {
+    let name = if include_backups {
+        "epg.monster-studio-output-all"
+    } else {
+        "epg.monster-studio-output"
+    };
     let picked = tauri_plugin_dialog::DialogExt::dialog(&app)
         .file()
-        .add_filter("M3U8", &["m3u8", "m3u"])
-        .set_file_name("playlist.m3u8")
+        .add_filter("M3U8 playlist", &["m3u8", "m3u"])
+        .set_file_name(name)
         .blocking_save_file();
     let Some(file) = picked else {
         return Ok("cancelled".into());
@@ -457,7 +465,258 @@ fn export_managed(
         export_visible_only(&channels)
     };
     std::fs::write(&path, body).map_err(|e| e.to_string())?;
-    Ok(format!("Wrote {}", path.display()))
+    Ok(if include_backups {
+        "Exported visible streams and backups".into()
+    } else {
+        "Exported visible streams".into()
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OutputRow {
+    id: String,
+    name: String,
+    group: String,
+    tvg_id: String,
+    visible_url: String,
+    variants_summary: String,
+    audit_status: String,
+    in_tuner: bool,
+    tuner_number: Option<i32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OutputSummary {
+    rows: Vec<OutputRow>,
+    recent_swaps: i32,
+    tuner_count: i32,
+    enabled_tuners: i32,
+    has_key: bool,
+}
+
+#[tauri::command]
+fn output_summary(state: tauri::State<AppState>, filter: Option<String>) -> Result<OutputSummary, String> {
+    let store = lock_store(&state)?;
+    let settings = store.load_settings().map_err(|e| e.to_string())?;
+    let mut channels = store.list_managed(None).map_err(|e| e.to_string())?;
+    if let Some(q) = filter.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let ql = q.to_ascii_lowercase();
+        channels.retain(|c| {
+            c.name.to_ascii_lowercase().contains(&ql)
+                || c.group_title.to_ascii_lowercase().contains(&ql)
+                || c.tvg_id
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+                    .contains(&ql)
+                || c.variants
+                    .iter()
+                    .find(|v| v.visibility == "visible")
+                    .or_else(|| c.variants.first())
+                    .map(|v| v.url.to_ascii_lowercase().contains(&ql))
+                    .unwrap_or(false)
+        });
+    }
+    let tuner_count = channels.iter().filter(|c| c.in_tuner).count() as i32;
+    let rows = channels
+        .into_iter()
+        .map(|c| {
+            let vis = c
+                .variants
+                .iter()
+                .find(|v| v.visibility == "visible")
+                .or_else(|| c.variants.first());
+            let hidden = c
+                .variants
+                .iter()
+                .filter(|v| v.visibility == "hidden_backup")
+                .count();
+            let audit = match vis.and_then(|v| v.last_audit_ok) {
+                None => "Unknown",
+                Some(true) => "OK",
+                Some(false) => "Fail",
+            };
+            OutputRow {
+                id: c.id,
+                name: c.name,
+                group: c.group_title,
+                tvg_id: c.tvg_id.unwrap_or_default(),
+                visible_url: vis
+                    .map(|v| v.url.clone())
+                    .filter(|u| !u.is_empty())
+                    .unwrap_or_else(|| "(none)".into()),
+                variants_summary: format!("1 vis + {hidden} hid"),
+                audit_status: audit.into(),
+                in_tuner: c.in_tuner,
+                tuner_number: c.tuner_number,
+            }
+        })
+        .collect();
+    Ok(OutputSummary {
+        rows,
+        recent_swaps: store.pending_swap_count(5).unwrap_or(0),
+        tuner_count,
+        enabled_tuners: settings.enabled_tuner_count(),
+        has_key: !settings.member_access_key.trim().is_empty(),
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TunerPickRow {
+    id: String,
+    name: String,
+    group: String,
+    included: bool,
+    number: Option<i32>,
+}
+
+#[tauri::command]
+fn lineup_candidates(state: tauri::State<AppState>) -> Result<Vec<TunerPickRow>, String> {
+    let channels = lock_store(&state)?
+        .list_managed(None)
+        .map_err(|e| e.to_string())?;
+    if channels.is_empty() {
+        return Err("Load a playlist in Playlist Editor first".into());
+    }
+    Ok(lineup::playlist_order(&channels)
+        .into_iter()
+        .map(|c| TunerPickRow {
+            id: c.id,
+            name: c.name,
+            group: c.group_title,
+            included: c.in_tuner,
+            number: c.tuner_number,
+        })
+        .collect())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TunerPick {
+    id: String,
+    included: bool,
+    number: Option<i32>,
+}
+
+#[tauri::command]
+fn save_tuner_lineup(state: tauri::State<AppState>, picks: Vec<TunerPick>) -> Result<String, String> {
+    let store = lock_store(&state)?;
+    let mut channels = store.list_managed(None).map_err(|e| e.to_string())?;
+    if channels.is_empty() {
+        return Err("Load a playlist in Playlist Editor first".into());
+    }
+    let ids: Vec<String> = picks
+        .iter()
+        .filter(|p| p.included)
+        .map(|p| p.id.clone())
+        .collect();
+    lineup::include(&mut channels, &ids);
+    for p in picks.iter().filter(|p| p.included) {
+        if let Some(n) = p.number.filter(|n| *n > 0) {
+            lineup::assign_number(&mut channels, &p.id, n).map_err(|e| e.to_string())?;
+        }
+    }
+    for ch in &channels {
+        store.upsert_managed(ch).map_err(|e| e.to_string())?;
+    }
+    let on_tuner = channels.iter().filter(|c| c.in_tuner).count();
+    let mut msg = format!("{on_tuner} channel(s) on tuner, ordered by playlist group");
+    if on_tuner > 400 {
+        msg.push_str(" — Plex cannot save a mapping this large (it puts every channel in the URL). Keep the Plex lineup under ~400, or use the IPTV card.");
+    }
+    Ok(msg)
+}
+
+#[tauri::command]
+fn export_channels_json(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<String, String> {
+    let store = lock_store(&state)?;
+    let settings = store.load_settings().map_err(|e| e.to_string())?;
+    let channels = store.list_managed(None).map_err(|e| e.to_string())?;
+    let cap = if settings.member_max_channels > 0 {
+        settings.member_max_channels
+    } else {
+        members::DEFAULT_MAX_CHANNELS
+    };
+    let built = curation::build(&channels, VERSION, None, Some(cap));
+    let picked = tauri_plugin_dialog::DialogExt::dialog(&app)
+        .file()
+        .add_filter("channels.json", &["json"])
+        .set_file_name("channels")
+        .blocking_save_file();
+    let Some(file) = picked else {
+        return Ok("cancelled".into());
+    };
+    let path = file.into_path().map_err(|e| e.to_string())?;
+    std::fs::write(&path, curation::to_json(&built.document)).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "channels.json · {} unique tvg-id · {} empty skipped · {} dups",
+        built.included, built.skipped_no_tvg_id, built.skipped_duplicate
+    ))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishReport {
+    ok: bool,
+    text: String,
+}
+
+#[tauri::command]
+fn publish_channels(state: tauri::State<AppState>) -> Result<PublishReport, String> {
+    let store = lock_store(&state)?;
+    let mut settings = store.load_settings().map_err(|e| e.to_string())?;
+    let key = settings.member_access_key.trim().to_string();
+    if key.is_empty() {
+        return Err("Add your my.epg.monster access key in Settings first.".into());
+    }
+    let channels = store.list_managed(None).map_err(|e| e.to_string())?;
+    drop(store);
+    let (built, result) = members::publish_lineup(
+        &settings.member_api_base,
+        &key,
+        &channels,
+        VERSION,
+    );
+    if result.ok {
+        if let Some(u) = result.feed_url.as_deref().filter(|s| !s.is_empty()) {
+            settings.member_feed_url = u.to_string();
+        }
+        if let Some(u) = result.feed_url_gz.as_deref().filter(|s| !s.is_empty()) {
+            settings.member_feed_url_gz = u.to_string();
+        }
+        if let Some(n) = result.max_channels.filter(|n| *n > 0) {
+            settings.member_max_channels = n;
+        }
+        if let Some(n) = result.max_body_bytes.filter(|n| *n > 0) {
+            settings.member_max_body_bytes = n;
+        }
+        settings.member_last_published_at = members_now();
+        lock_store(&state)?
+            .save_settings(&settings)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(PublishReport {
+        ok: result.ok,
+        text: members::format_publish_report(&built, &result),
+    })
+}
+
+fn members_now() -> String {
+    time_utc_compact()
+}
+
+fn time_utc_compact() -> String {
+    let n = studio_core::audit::now_iso();
+    if let Some((d, rest)) = n.split_once('T') {
+        let t = rest.trim_end_matches('Z');
+        let t = t.get(..8).unwrap_or(t);
+        format!("{d}T{t}Z")
+    } else {
+        n
+    }
 }
 
 #[tauri::command]
@@ -914,6 +1173,11 @@ pub fn run() {
             add_from_source,
             import_curated,
             export_managed,
+            output_summary,
+            lineup_candidates,
+            save_tuner_lineup,
+            export_channels_json,
+            publish_channels,
             clear_managed,
             load_settings,
             save_settings,

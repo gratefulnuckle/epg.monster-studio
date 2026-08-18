@@ -630,6 +630,48 @@ input.tvg-ok {
   border-radius: 4px 4px 0 0;
 }
 
+.output-table {
+  background: #16161e;
+  border: 1px solid var(--studio-stroke);
+  border-radius: 8px;
+  min-height: 400px;
+  display: flex;
+  flex-direction: column;
+}
+
+.output-head,
+.output-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 2fr 100px 80px;
+  gap: 10px;
+  padding: 8px 18px;
+  align-items: center;
+}
+
+.output-head {
+  background: #1e1e28;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.55;
+}
+
+.output-row {
+  padding: 6px 18px;
+  border-bottom: 1px solid #1c1c24;
+}
+
+.lineup-row {
+  display: grid;
+  grid-template-columns: 1fr 88px;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.lineup-num {
+  width: 88px;
+}
+
 .stream-row {
   display: grid;
   grid-template-columns: auto 1fr auto auto auto auto;

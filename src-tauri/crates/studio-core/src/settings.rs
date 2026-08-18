@@ -184,6 +184,18 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    pub fn enabled_tuner_count(&self) -> i32 {
+        [
+            self.plex_tuner.enabled,
+            self.jellyfin_tuner.enabled,
+            self.emby_tuner.enabled,
+            self.iptv_tuner.enabled,
+        ]
+        .into_iter()
+        .filter(|e| *e)
+        .count() as i32
+    }
+
     pub fn ensure_tuner_profiles(&mut self) {
         self.plex_tuner.kind = "Plex".into();
         self.jellyfin_tuner.kind = "Jellyfin".into();
