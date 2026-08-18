@@ -2,8 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import "./styles.css";
 import { mountShell } from "./shell";
 
-const app = document.querySelector<HTMLDivElement>("#app");
-if (!app) throw new Error("#app missing");
+const appEl = document.querySelector<HTMLDivElement>("#app");
+if (!appEl) throw new Error("#app missing");
+const app = appEl;
 
 type SplashCheck = { label: string; ok: boolean; detail: string };
 

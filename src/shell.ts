@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { api, type Channel, type Source } from "./api";
 
 export type NavId =
   | "audit"
@@ -76,12 +77,16 @@ export function mountShell(root: HTMLElement): void {
     window.setTimeout(() => toast.classList.remove("open"), 3000);
   };
 
+  let current: NavId = "audit";
+
   const render = (id: NavId) => {
+    current = id;
     root.querySelectorAll(".nav-item").forEach((el) => {
       el.classList.toggle("active", (el as HTMLElement).dataset.nav === id);
     });
     search.classList.toggle("hidden", !SEARCH_PAGES.includes(id));
     page.innerHTML = pageHtml(id);
+    if (id === "audit") void mountSources(page, showToast);
   };
 
   root.querySelectorAll<HTMLButtonElement>("[data-nav]").forEach((btn) => {
@@ -91,19 +96,19 @@ export function mountShell(root: HTMLElement): void {
   root.querySelector("#about")!.addEventListener("click", () => aboutDlg.classList.add("open"));
   root.querySelector("#about-close")!.addEventListener("click", () => aboutDlg.classList.remove("open"));
 
+  let searchTimer = 0;
+  search.addEventListener("input", () => {
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => {
+      if (current === "audit") {
+        page.dispatchEvent(new CustomEvent("studio-search", { detail: search.value }));
+      }
+    }, 200);
+  });
+
   root.addEventListener("click", async (ev) => {
     const t = ev.target as HTMLElement;
-    if (t.id === "add-source") {
-      try {
-        const added = await invoke<boolean>("pick_source_file");
-        showToast(added ? "Source loaded." : "No file selected.");
-      } catch (e) {
-        showToast(String(e));
-      }
-    }
-    if (t.id === "save-settings") {
-      showToast("Settings saved.");
-    }
+    if (t.id === "save-settings") showToast("Settings saved.");
     if (t.id === "detect-tools") {
       try {
         const n = await invoke<number>("detect_bundled_tools");
@@ -117,16 +122,220 @@ export function mountShell(root: HTMLElement): void {
   render("audit");
 }
 
+async function mountSources(page: HTMLElement, toast: (s: string) => void): Promise<void> {
+  const tabs = page.querySelector("#source-tabs")!;
+  const groupsEl = page.querySelector("#source-groups")!;
+  const channelsEl = page.querySelector("#source-channels")!;
+  const empty = page.querySelector<HTMLElement>("#source-empty")!;
+  const workspace = page.querySelector<HTMLElement>("#source-workspace")!;
+  const urlDlg = page.querySelector<HTMLElement>("#url-dlg")!;
+
+  let sources: Source[] = [];
+  let activeId = "";
+  let searching = false;
+
+  const paintTabs = () => {
+    tabs.innerHTML = "";
+    for (const s of sources) {
+      const b = document.createElement("button");
+      b.className = "tab" + (s.id === activeId ? " active" : "");
+      b.textContent = `${s.name} (${s.channelCount})`;
+      b.addEventListener("click", () => {
+        activeId = s.id;
+        paintTabs();
+        void loadGroups();
+      });
+      const x = document.createElement("span");
+      x.className = "tab-x";
+      x.textContent = "×";
+      x.title = "Close tab";
+      x.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        try {
+          await api.removeSource(s.id);
+          toast("Source removed.");
+          await reload();
+        } catch (e) {
+          toast(String(e));
+        }
+      });
+      b.appendChild(x);
+      tabs.appendChild(b);
+    }
+    const add = document.createElement("button");
+    add.className = "tab add";
+    add.textContent = "+";
+    add.title = "Add source…";
+    add.addEventListener("click", () => urlDlg.classList.add("open"));
+    tabs.appendChild(add);
+  };
+
+  const loadGroups = async () => {
+    if (!activeId) return;
+    const groups = await api.listGroups(activeId);
+    groupsEl.innerHTML = "";
+    for (const g of groups) {
+      const row = document.createElement("button");
+      row.className = "group-row";
+      row.textContent = `${g.title}  (${g.count})`;
+      row.addEventListener("click", async () => {
+        groupsEl.querySelectorAll(".group-row").forEach((el) => el.classList.remove("active"));
+        row.classList.add("active");
+        const chans = await api.listChannels(activeId, g.title);
+        paintChannels(chans, false);
+      });
+      groupsEl.appendChild(row);
+    }
+    if (groups[0]) (groupsEl.firstElementChild as HTMLButtonElement | null)?.click();
+  };
+
+  const paintChannels = (chans: Channel[], isSearch: boolean) => {
+    searching = isSearch;
+    channelsEl.innerHTML = "";
+    for (const c of chans) {
+      const row = document.createElement("div");
+      row.className = "chan-row";
+      row.innerHTML = `
+        <button class="play" data-url="${escapeAttr(c.url)}" data-sid="${escapeAttr(c.sourceId)}">Play</button>
+        <div class="chan-meta">
+          <div class="chan-name">${escapeHtml(c.name)}</div>
+          <div class="chan-sub">${escapeHtml(c.groupTitle)}${c.tvgId ? " · " : ""}<span class="copy" data-copy="${escapeAttr(c.tvgId ?? "")}">${escapeHtml(c.tvgId ?? "")}</span></div>
+        </div>
+        <span class="copy url" data-copy="${escapeAttr(c.url)}" title="${escapeAttr(c.url)}">${escapeHtml(truncate(c.url, 64))}</span>
+      `;
+      channelsEl.appendChild(row);
+    }
+  };
+
+  const reload = async () => {
+    sources = await api.listSources();
+    const has = sources.length > 0;
+    empty.style.display = has ? "none" : "block";
+    workspace.style.display = has ? "grid" : "none";
+    if (!has) {
+      activeId = "";
+      return;
+    }
+    if (!sources.some((s) => s.id === activeId)) activeId = sources[0].id;
+    paintTabs();
+    await loadGroups();
+  };
+
+  page.addEventListener("studio-search", async (ev) => {
+    const q = (ev as CustomEvent<string>).detail ?? "";
+    if (q.trim().length < 2) {
+      if (searching) await loadGroups();
+      return;
+    }
+    try {
+      const hits = await api.searchSources(q);
+      paintChannels(hits, true);
+      toast(`${hits.length} match${hits.length === 1 ? "" : "es"}`);
+    } catch (e) {
+      toast(String(e));
+    }
+  });
+
+  page.querySelector("#add-file")?.addEventListener("click", async () => {
+    try {
+      const src = await api.pickSourceFile();
+      if (src) {
+        toast(`Loaded ${src.name} (${src.channelCount}).`);
+        await reload();
+      }
+    } catch (e) {
+      toast(String(e));
+    }
+  });
+  page.querySelector("#add-url-open")?.addEventListener("click", () => urlDlg.classList.add("open"));
+  page.querySelector("#url-cancel")?.addEventListener("click", () => urlDlg.classList.remove("open"));
+  page.querySelector("#url-ok")?.addEventListener("click", async () => {
+    const url = (page.querySelector("#url-input") as HTMLInputElement).value.trim();
+    const name = (page.querySelector("#url-name") as HTMLInputElement).value.trim();
+    const ua = (page.querySelector("#url-ua") as HTMLInputElement).value.trim();
+    if (!url) {
+      toast("Enter an HTTP(S) URL.");
+      return;
+    }
+    const headers: Record<string, string> = {};
+    if (ua) headers["User-Agent"] = ua;
+    try {
+      const src = await api.addSourceUrl(url, name || undefined, headers);
+      urlDlg.classList.remove("open");
+      toast(`Loaded ${src.name} (${src.channelCount}).`);
+      await reload();
+    } catch (e) {
+      toast(String(e));
+    }
+  });
+
+  channelsEl.addEventListener("click", async (ev) => {
+    const t = ev.target as HTMLElement;
+    if (t.classList.contains("play")) {
+      try {
+        await api.playUrl(t.dataset.url ?? "", t.dataset.sid);
+        toast("Play");
+      } catch (e) {
+        toast(String(e));
+      }
+    }
+    if (t.classList.contains("copy") && t.dataset.copy) {
+      await navigator.clipboard.writeText(t.dataset.copy);
+      toast("Copied.");
+    }
+  });
+
+  try {
+    await reload();
+  } catch (e) {
+    toast(String(e));
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+}
+
+function escapeAttr(s: string): string {
+  return escapeHtml(s);
+}
+
+function truncate(s: string, n: number): string {
+  return s.length <= n ? s : s.slice(0, n - 1) + "…";
+}
+
 function pageHtml(id: NavId): string {
   switch (id) {
     case "audit":
       return `
         <h1 class="page-title">Add Sources</h1>
         <p class="page-sub">Load file or URL playlists (custom headers). Groups + channels, play (mpv/VLC), copy URL/tvg-id.</p>
-        <div class="empty">
+        <div class="source-bar">
+          <button class="accent" id="add-file">Add source…</button>
+          <button id="add-url-open">Add URL…</button>
+        </div>
+        <div class="empty" id="source-empty">
           <div class="glyph">☰</div>
           <p>Add source…</p>
-          <button class="accent" id="add-source">Add source…</button>
+        </div>
+        <div class="source-workspace" id="source-workspace">
+          <div class="tabs" id="source-tabs"></div>
+          <div class="source-split">
+            <div class="groups" id="source-groups"></div>
+            <div class="channels" id="source-channels"></div>
+          </div>
+        </div>
+        <div class="dialog-backdrop" id="url-dlg">
+          <div class="dialog">
+            <h2>Add source</h2>
+            <div class="field"><label>HTTP(S) URL</label><input id="url-input" placeholder="https://…" /></div>
+            <div class="field"><label>Tab name</label><input id="url-name" placeholder="Provider" /></div>
+            <div class="field"><label>User-Agent</label><input id="url-ua" /></div>
+            <div class="dialog-actions">
+              <button id="url-cancel">Cancel</button>
+              <button class="accent" id="url-ok">Load</button>
+            </div>
+          </div>
         </div>`;
     case "editor":
       return `

@@ -4,6 +4,7 @@ pub mod info;
 pub mod models;
 pub mod parser;
 pub mod paths;
+pub mod player;
 pub mod settings;
 pub mod store;
 pub mod tools;
