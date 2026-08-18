@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "epg.monster studio",
+  "version": "1.0.0-beta",
+  "identifier": "monster.epg.studio",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "epg.monster studio",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "backgroundColor": "#0C0C10"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "copyright": "GPL-3.0-or-later",
+    "shortDescription": "epg.monster studio",
+    "longDescription": "Windows desktop studio for curating IPTV playlists and presenting them as a local HDHomeRun tuner."
+  }
+}

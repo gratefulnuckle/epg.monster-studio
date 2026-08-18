@@ -1,0 +1,3 @@
+# Keep Rust artifacts off C:.
+[build]
+target-dir = "S:\\toolchains\\cargo-target\\epg-monster-studio"

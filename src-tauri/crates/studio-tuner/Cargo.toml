@@ -1,0 +1,9 @@
+[package]
+name = "studio-tuner"
+version = "1.0.0-beta"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Local HDHomeRun / IPTV tuner hosts"
+
+[dependencies]
+studio-core = { path = "../studio-core" }

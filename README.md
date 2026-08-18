@@ -6,12 +6,14 @@ This is not a “similar playlist tool.” Every shipped surface, label, color, 
 
 **Product window title:** `epg.monster studio`  
 **Repo / project name:** `epg.monster-studio(tauri)`  
-**Folder:** `epg.monster-studio-tauri`  
+**Folder:** `S:\Projects\epg.monster-studio-tauri` (also `C:\Users\jonat\Projects\...` via junction)  
 **License:** GNU GPL-3.0 (same as the source; ffmpeg/mpv notices in `THIRD_PARTY_NOTICES.md`)
 
 ## Status
 
-OpenSpec written. Application code is **not** implemented yet.
+OpenSpec written. Tauri v2 + `studio-core` / `studio-tuner` scaffold and app shell are in progress on **S:** (C: is too small for Node/Rust builds).
+
+Work the change:
 
 Work the change:
 
@@ -25,7 +27,7 @@ Then `/opsx:apply` (or implement `tasks.md` by hand) and `/opsx:archive` when th
 
 | What | Where |
 |------|--------|
-| Shipped Windows app | `C:\Users\jonat\projects\epg.monster-studio` · [github.com/gratefulnuckle/epg.monster-studio](https://github.com/gratefulnuckle/epg.monster-studio) |
+| Shipped Windows app | `S:\Projects\epg.monster-studio` · [github.com/gratefulnuckle/epg.monster-studio](https://github.com/gratefulnuckle/epg.monster-studio) |
 | Behavior contract | `openspec/changes/1-1-tauri-remake/` |
 | Project conventions | `openspec/project.md` |
 | Historical C# spec (outdated vs v1.0-beta) | source `docs/openspec/OpenSpec.md` |

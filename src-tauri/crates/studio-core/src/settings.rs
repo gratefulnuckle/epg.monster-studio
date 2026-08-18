@@ -1,0 +1,239 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
+
+use crate::info::USER_AGENT;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr, Default)]
+#[repr(i32)]
+pub enum PlayerEngine {
+    #[default]
+    Mpv = 0,
+    Vlc = 1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct TunerServerProfile {
+    pub kind: String,
+    pub enabled: bool,
+    pub running: bool,
+    pub friendly_name: String,
+    pub device_id: String,
+    pub tuner_count: i32,
+    pub bind_address: String,
+    pub port: i32,
+    pub allow_lan: bool,
+    pub remux_enabled: bool,
+    pub downspiral_enabled: bool,
+}
+
+impl TunerServerProfile {
+    pub fn create_default(kind: &str) -> Self {
+        let port = match kind {
+            "Plex" => 8080,
+            "Jellyfin" => 8081,
+            "Emby" => 8082,
+            _ => 8083,
+        };
+        Self {
+            kind: kind.to_string(),
+            enabled: kind == "Iptv",
+            running: false,
+            friendly_name: if kind == "Iptv" {
+                "epg.monster studio (iptv)".into()
+            } else {
+                format!("epg.monster studio ({})", kind.to_lowercase())
+            },
+            device_id: new_device_id(),
+            tuner_count: 2,
+            bind_address: "127.0.0.1".into(),
+            port,
+            allow_lan: false,
+            remux_enabled: true,
+            downspiral_enabled: false,
+        }
+    }
+
+    pub fn ensure_identity(&mut self) {
+        if self.device_id.trim().is_empty() {
+            self.device_id = new_device_id();
+        }
+        self.device_id = self.device_id.trim().to_uppercase();
+        if self.tuner_count < 1 {
+            self.tuner_count = 1;
+        }
+        if self.tuner_count > 16 {
+            self.tuner_count = 16;
+        }
+        if self.port < 1
+            || self.port > 65535
+            || matches!(self.port, 5004 | 5005 | 5006 | 5007)
+        {
+            self.port = match self.kind.as_str() {
+                "Plex" => 8080,
+                "Jellyfin" => 8081,
+                "Emby" => 8082,
+                _ => 8083,
+            };
+        }
+        if self.bind_address.trim().is_empty() {
+            self.bind_address = "127.0.0.1".into();
+        }
+    }
+}
+
+fn new_device_id() -> String {
+    uuid::Uuid::new_v4().as_bytes()[..4]
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub struct AppSettings {
+    pub default_player: PlayerEngine,
+    pub mpv_path: String,
+    pub vlc_path: String,
+    pub ffmpeg_path: String,
+    pub ffprobe_path: String,
+    pub audit_delay_ms: i32,
+    pub audit_timeout_ms: i32,
+    pub auto_swap_on_audit_fail: bool,
+    pub pause_audit_while_playing: bool,
+    pub default_user_agent: String,
+    pub python_path: Option<String>,
+    pub epg_share_url: String,
+    pub epg_xml_url: String,
+    pub epg_xml_urls: Option<Vec<String>>,
+    pub plex_tuner: TunerServerProfile,
+    pub jellyfin_tuner: TunerServerProfile,
+    pub emby_tuner: TunerServerProfile,
+    pub iptv_tuner: TunerServerProfile,
+    pub tuner_use_member_epg: bool,
+    pub discovery_enabled: bool,
+    pub remux_engine: String,
+    pub remux_profile: String,
+    pub remux_buffer_kb: i32,
+    pub weekly_audit_json: String,
+    pub weekly_audit_auto_run: bool,
+    pub black_detect_enabled: bool,
+    pub weekly_audit_last_run: String,
+    pub logo_save_directory: String,
+    pub host_logos_on_tuner: bool,
+    pub use_local_logos: bool,
+    pub member_email: String,
+    pub member_username: String,
+    pub member_access_key: String,
+    pub member_api_base: String,
+    pub member_feed_url: String,
+    pub member_feed_url_gz: String,
+    pub member_max_channels: i32,
+    pub member_max_body_bytes: i32,
+    pub member_last_published_at: String,
+    pub member_last_ping_at: String,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            default_player: PlayerEngine::Mpv,
+            mpv_path: String::new(),
+            vlc_path: String::new(),
+            ffmpeg_path: String::new(),
+            ffprobe_path: String::new(),
+            audit_delay_ms: 6000,
+            audit_timeout_ms: 15000,
+            auto_swap_on_audit_fail: true,
+            pause_audit_while_playing: true,
+            default_user_agent: USER_AGENT.into(),
+            python_path: None,
+            epg_share_url: String::new(),
+            epg_xml_url: "https://epg.monster/epg.xml".into(),
+            epg_xml_urls: None,
+            plex_tuner: TunerServerProfile::create_default("Plex"),
+            jellyfin_tuner: TunerServerProfile::create_default("Jellyfin"),
+            emby_tuner: TunerServerProfile::create_default("Emby"),
+            iptv_tuner: TunerServerProfile::create_default("Iptv"),
+            tuner_use_member_epg: false,
+            discovery_enabled: true,
+            remux_engine: "ffmpeg".into(),
+            remux_profile: "mpeg2_ac3".into(),
+            remux_buffer_kb: 4096,
+            weekly_audit_json: String::new(),
+            weekly_audit_auto_run: false,
+            black_detect_enabled: false,
+            weekly_audit_last_run: String::new(),
+            logo_save_directory: String::new(),
+            host_logos_on_tuner: false,
+            use_local_logos: false,
+            member_email: String::new(),
+            member_username: String::new(),
+            member_access_key: String::new(),
+            member_api_base: "https://epg.monster".into(),
+            member_feed_url: String::new(),
+            member_feed_url_gz: String::new(),
+            member_max_channels: 2500,
+            member_max_body_bytes: 3_145_728,
+            member_last_published_at: String::new(),
+            member_last_ping_at: String::new(),
+        }
+    }
+}
+
+impl AppSettings {
+    pub fn ensure_tuner_profiles(&mut self) {
+        self.plex_tuner.kind = "Plex".into();
+        self.jellyfin_tuner.kind = "Jellyfin".into();
+        self.emby_tuner.kind = "Emby".into();
+        self.iptv_tuner.kind = "Iptv".into();
+        for p in [
+            &mut self.plex_tuner,
+            &mut self.jellyfin_tuner,
+            &mut self.emby_tuner,
+            &mut self.iptv_tuner,
+        ] {
+            p.ensure_identity();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_match_csharp() {
+        let s = AppSettings::default();
+        assert_eq!(s.audit_delay_ms, 6000);
+        assert_eq!(s.audit_timeout_ms, 15000);
+        assert!(s.auto_swap_on_audit_fail);
+        assert!(s.iptv_tuner.enabled);
+        assert!(!s.plex_tuner.enabled);
+        assert_eq!(s.plex_tuner.port, 8080);
+        assert_eq!(s.iptv_tuner.port, 8083);
+        assert_eq!(s.epg_xml_url, "https://epg.monster/epg.xml");
+        assert_eq!(s.default_user_agent, USER_AGENT);
+    }
+
+    #[test]
+    fn json_round_trip_pascal_case() {
+        let s = AppSettings::default();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"AuditDelayMs\""));
+        assert!(json.contains("\"IptvTuner\""));
+        let back: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.audit_delay_ms, 6000);
+        assert_eq!(back.default_player, PlayerEngine::Mpv);
+    }
+
+    #[test]
+    fn migrates_legacy_ports() {
+        let mut p = TunerServerProfile::create_default("Plex");
+        p.port = 5004;
+        p.ensure_identity();
+        assert_eq!(p.port, 8080);
+    }
+}
