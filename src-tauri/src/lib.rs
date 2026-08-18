@@ -91,6 +91,13 @@ struct UrlSourceArgs {
     headers: Option<BTreeMap<String, String>>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileSourceArgs {
+    path: String,
+    name: Option<String>,
+}
+
 impl From<PlaylistSource> for SourceDto {
     fn from(s: PlaylistSource) -> Self {
         Self {
@@ -391,6 +398,38 @@ fn pick_source_file(
         .add_file_source(&path)
         .map_err(|e| e.to_string())?;
     Ok(Some(src.into()))
+}
+
+#[tauri::command]
+fn pick_playlist_path(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let picked = tauri_plugin_dialog::DialogExt::dialog(&app)
+        .file()
+        .add_filter("Playlists", &["m3u", "m3u8", "txt"])
+        .blocking_pick_file();
+    let Some(file) = picked else {
+        return Ok(None);
+    };
+    Ok(Some(
+        file.into_path()
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .into_owned(),
+    ))
+}
+
+#[tauri::command]
+fn add_source_file(
+    state: tauri::State<AppState>,
+    args: FileSourceArgs,
+) -> Result<SourceDto, String> {
+    let path = std::path::PathBuf::from(args.path.trim().trim_matches('"'));
+    if !path.is_file() {
+        return Err("File path (required — browse or paste a valid path)".into());
+    }
+    lock_store(&state)?
+        .add_file_source_named(&path, args.name.as_deref())
+        .map(SourceDto::from)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1805,6 +1844,8 @@ pub fn run() {
             search_sources,
             remove_source,
             pick_source_file,
+            pick_playlist_path,
+            add_source_file,
             add_source_url,
             play_url,
             refresh_source,

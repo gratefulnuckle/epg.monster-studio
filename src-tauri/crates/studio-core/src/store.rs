@@ -279,13 +279,26 @@ impl SqliteStore {
     }
 
     pub fn add_file_source(&self, path: &Path) -> Result<PlaylistSource, StoreError> {
+        self.add_file_source_named(path, None)
+    }
+
+    pub fn add_file_source_named(
+        &self,
+        path: &Path,
+        name: Option<&str>,
+    ) -> Result<PlaylistSource, StoreError> {
         let content = std::fs::read_to_string(path)?;
         let id = uuid::Uuid::new_v4().simple().to_string();
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("playlist")
-            .to_string();
+        let name = name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("playlist")
+                    .to_string()
+            });
         self.insert_parsed_source(
             &id,
             &name,

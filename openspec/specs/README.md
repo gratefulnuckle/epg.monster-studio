@@ -1,11 +1,9 @@
 # Current specs
 
-Empty on purpose. This remake has not been implemented yet, so there is no archived behavior.
+Living source of truth after archive of `1-1-tauri-remake`.
 
-The contract lives in:
+These requirements describe the shipped Tauri remake of epg.monster studio (C# WinUI 3 v1.0-beta). New work goes through `openspec/changes/<name>/`.
 
-```
-openspec/changes/1-1-tauri-remake/specs/
-```
+C# source still wins if a spec and `S:\Projects\epg.monster-studio` disagree.
 
-After `/opsx:archive`, those ADDED requirements merge here.
+Parity walk tasks 13.1–13.4 were left for a later pass (side-by-side UI, real AppData DB, tuner self-test, `/lineup.json` leak check).

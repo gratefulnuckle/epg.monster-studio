@@ -98,7 +98,7 @@ export function presentCrash(root: HTMLElement, report: CrashReport): void {
   host.className = "dialog-backdrop open";
   host.innerHTML = `
     <div class="dialog" style="width:720px;max-height:85vh;overflow:auto">
-      <h2>epg.monster studio — crash report</h2>
+      <h2>Something went wrong</h2>
       <div class="chan-name">${esc(report.title)}</div>
       <p class="page-sub">${esc(kind)} · ${esc(report.when)}</p>
       <p>${esc(report.summary)}</p>

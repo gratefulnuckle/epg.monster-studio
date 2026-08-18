@@ -69,11 +69,16 @@ export function mountShell(root: HTMLElement): { toast: (s: string) => void } {
       </div>
       <div class="toast" id="toast"></div>
       <div class="dialog-backdrop" id="about-dlg">
-        <div class="dialog">
-          <h2>About epg.monster studio</h2>
-          <p>epg.monster studio</p>
-          <p>GNU General Public License v3.0</p>
-          <p><a href="https://www.gnu.org/licenses/gpl-3.0.html">https://www.gnu.org/licenses/gpl-3.0.html</a></p>
+        <div class="dialog" style="width:520px;max-height:80vh;overflow:auto;text-align:center">
+          <h2>About</h2>
+          <img src="/logo.png" alt="epg.monster studio" style="width:96px;height:96px" />
+          <p class="chan-name" style="font-size:22px">epg.monster studio</p>
+          <p class="page-sub" id="about-ver">version v1.0-beta</p>
+          <div style="text-align:left">
+            <p><strong>What it is</strong><br />A Windows workspace for a legal IPTV lineup: import sources, curate channels and backups, match EPG from epg.monster, check logos and streams, then publish a managed playlist or a local virtual tuner.</p>
+            <p><strong>Built with</strong><br />Rust and TypeScript, Tauri v2, SQLite (rusqlite). Playback and probes use bundled ffmpeg, ffprobe, and mpv. Optional VLC if installed.</p>
+            <p><strong>License</strong><br />GNU General Public License v3.0. ffmpeg and mpv are also GNU GPL. You may run, study, share, and change this software under the GPL. Full text: <a href="https://www.gnu.org/licenses/gpl-3.0.html">https://www.gnu.org/licenses/gpl-3.0.html</a></p>
+          </div>
           <div class="dialog-actions">
             <button id="about-close">Close</button>
           </div>
@@ -129,7 +134,17 @@ export function mountShell(root: HTMLElement): { toast: (s: string) => void } {
     btn.addEventListener("click", () => render(btn.dataset.nav as NavId));
   });
 
-  root.querySelector("#about")!.addEventListener("click", () => aboutDlg.classList.add("open"));
+  root.querySelector("#about")!.addEventListener("click", () => {
+    aboutDlg.classList.add("open");
+    void invoke<{ version: string; displayName: string }>("get_studio_info")
+      .then((info) => {
+        const el = root.querySelector("#about-ver");
+        if (el) el.textContent = `version ${info.version}`;
+      })
+      .catch(() => {
+        /* keep fallback */
+      });
+  });
   root.querySelector("#about-close")!.addEventListener("click", () => aboutDlg.classList.remove("open"));
   root.querySelector("#pane-toggle")!.addEventListener("click", () => {
     workspace.classList.toggle("pane-closed");
@@ -206,7 +221,7 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
   const channelsEl = page.querySelector<HTMLElement>("#source-channels")!;
   const empty = page.querySelector<HTMLElement>("#source-empty")!;
   const workspace = page.querySelector<HTMLElement>("#source-workspace")!;
-  const urlDlg = page.querySelector<HTMLElement>("#url-dlg")!;
+  const srcDlg = page.querySelector<HTMLElement>("#src-dlg")!;
 
   let sources: Source[] = [];
   let activeId = "";
@@ -249,7 +264,7 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
     add.className = "tab add";
     add.textContent = "+";
     add.title = "Add source…";
-    add.addEventListener("click", () => urlDlg.classList.add("open"));
+    add.addEventListener("click", () => srcDlg.classList.add("open"));
     tabs.appendChild(add);
   };
 
@@ -345,38 +360,85 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
     }
   });
 
-  const addFile = async () => {
-    try {
-      const src = await api.pickSourceFile();
-      if (src) {
-        toast(`Loaded ${src.name} (${src.channelCount}).`);
-        await reload();
-      }
-    } catch (e) {
-      toast(String(e));
-    }
+  const openAddSource = () => srcDlg.classList.add("open");
+  const applySourceMode = () => {
+    const fileMode = (page.querySelector("#src-mode") as HTMLSelectElement).value !== "url";
+    page.querySelector<HTMLElement>("#src-file-panel")!.hidden = !fileMode;
+    page.querySelector<HTMLElement>("#src-url-panel")!.hidden = fileMode;
   };
-  page.querySelector("#add-file")?.addEventListener("click", () => void addFile());
-  page.querySelector("#empty-add")?.addEventListener("click", () => void addFile());
-  page.querySelector("#add-url-open")?.addEventListener("click", () => urlDlg.classList.add("open"));
-  page.querySelector("#url-cancel")?.addEventListener("click", () => urlDlg.classList.remove("open"));
-  page.querySelector("#url-ok")?.addEventListener("click", async () => {
-    const url = (page.querySelector("#url-input") as HTMLInputElement).value.trim();
-    const name = (page.querySelector("#url-name") as HTMLInputElement).value.trim();
-    const ua = (page.querySelector("#url-ua") as HTMLInputElement).value.trim();
-    if (!url) {
-      toast("Enter an HTTP(S) URL.");
-      return;
-    }
+  const buildExtraHeaders = (ua: string, auth: string, cookie: string, extra: string) => {
     const headers: Record<string, string> = {};
     if (ua) headers["User-Agent"] = ua;
+    if (auth) headers["Authorization"] = auth;
+    if (cookie) headers["Cookie"] = cookie;
+    for (const line of extra.split(/\r?\n/)) {
+      const idx = line.indexOf(":");
+      if (idx <= 0) continue;
+      const key = line.slice(0, idx).trim();
+      const val = line.slice(idx + 1).trim();
+      if (key) headers[key] = val;
+    }
+    return headers;
+  };
+  page.querySelector("#empty-add")?.addEventListener("click", openAddSource);
+  page.querySelector("#src-mode")?.addEventListener("change", applySourceMode);
+  page.querySelector("#src-cancel")?.addEventListener("click", () => srcDlg.classList.remove("open"));
+  page.querySelector("#src-browse")?.addEventListener("click", async () => {
     try {
-      const src = await api.addSourceUrl(url, name || undefined, headers);
-      urlDlg.classList.remove("open");
-      toast(`Loaded ${src.name} (${src.channelCount}).`);
+      const path = await invoke<string | null>("pick_playlist_path");
+      if (!path) return;
+      (page.querySelector("#src-file") as HTMLInputElement).value = path;
+      const name = page.querySelector<HTMLInputElement>("#src-name")!;
+      if (!name.value.trim()) {
+        const base = path.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, "");
+        if (base) name.value = base;
+      }
+    } catch (e) {
+      const label = page.querySelector("#src-file-label")!;
+      label.textContent = `Browse failed — paste full path`;
+      toast(String(e));
+    }
+  });
+  page.querySelector("#src-load")?.addEventListener("click", async () => {
+    const fileMode = (page.querySelector("#src-mode") as HTMLSelectElement).value !== "url";
+    const display = (page.querySelector("#src-name") as HTMLInputElement).value.trim() || undefined;
+    try {
+      let src: Source;
+      if (fileMode) {
+        const path = (page.querySelector("#src-file") as HTMLInputElement).value.trim().replace(/^"|"$/g, "");
+        if (!path) {
+          page.querySelector("#src-file-label")!.textContent = "File path (required — browse or paste a valid path)";
+          return;
+        }
+        src = await invoke<Source>("add_source_file", { args: { path, name: display } });
+      } else {
+        const url = (page.querySelector("#src-url") as HTMLInputElement).value.trim();
+        if (!url || !/^https?:\/\//i.test(url)) {
+          page.querySelector("#src-url-label")!.textContent = "Playlist URL (required — valid http/https)";
+          return;
+        }
+        let ua = (page.querySelector("#src-ua") as HTMLInputElement).value.trim();
+        if (!ua) {
+          try {
+            const st = await invoke<{ DefaultUserAgent?: string }>("load_settings");
+            ua = (st.DefaultUserAgent ?? "").trim();
+          } catch {
+            /* use empty */
+          }
+        }
+        const headers = buildExtraHeaders(
+          ua,
+          (page.querySelector("#src-auth") as HTMLInputElement).value.trim(),
+          (page.querySelector("#src-cookie") as HTMLInputElement).value.trim(),
+          (page.querySelector("#src-extra") as HTMLTextAreaElement).value,
+        );
+        src = await api.addSourceUrl(url, display, headers);
+      }
+      srcDlg.classList.remove("open");
+      toast(`Loaded ${src.channelCount.toLocaleString()} channels from ${src.name}`);
       await reload();
     } catch (e) {
-      toast(String(e));
+      toast("Add source failed: " + String(e));
     }
   });
 
@@ -547,8 +609,6 @@ function pageHtml(id: NavId): string {
         <h1 class="page-title">Add Sources</h1>
         <p class="page-sub">Load file or URL playlists (custom headers). Groups + channels, play (mpv/VLC), copy URL/tvg-id.</p>
         <div class="source-bar">
-          <button class="accent" id="add-file">Add source…</button>
-          <button id="add-url-open">Add URL…</button>
           <button id="src-refresh" title="Reload active source">Refresh</button>
           <select id="src-player" title="Player for Play button">
             <option value="0">mpv</option>
@@ -570,15 +630,36 @@ function pageHtml(id: NavId): string {
             <div class="channels" id="source-channels"></div>
           </div>
         </div>
-        <div class="dialog-backdrop" id="url-dlg">
-          <div class="dialog">
-            <h2>Add source</h2>
-            <div class="field"><label>HTTP(S) URL</label><input id="url-input" placeholder="https://…" /></div>
-            <div class="field"><label>Tab name</label><input id="url-name" placeholder="Provider" /></div>
-            <div class="field"><label>User-Agent</label><input id="url-ua" /></div>
+        <div class="dialog-backdrop" id="src-dlg">
+          <div class="dialog" style="width:480px;max-height:80vh;overflow:auto">
+            <h2>Add playlist source</h2>
+            <div class="field"><label>Source type</label>
+              <select id="src-mode">
+                <option value="file">Local file (.m3u / .m3u8)</option>
+                <option value="url">HTTP(S) URL</option>
+              </select></div>
+            <div id="src-file-panel">
+              <div class="field"><label id="src-file-label">File path</label>
+                <input id="src-file" placeholder="Full path or use Browse…" /></div>
+              <button id="src-browse">Browse…</button>
+            </div>
+            <div id="src-url-panel" hidden>
+              <div class="field"><label id="src-url-label">Playlist URL</label>
+                <input id="src-url" placeholder="https://…" /></div>
+              <div class="field"><label>User-Agent (optional)</label>
+                <input id="src-ua" placeholder="Uses Settings default if empty" /></div>
+              <div class="field"><label>Authorization (optional)</label>
+                <input id="src-auth" placeholder="Bearer …" /></div>
+              <div class="field"><label>Cookie (optional)</label>
+                <input id="src-cookie" /></div>
+              <div class="field"><label>Extra headers (one Key: Value per line)</label>
+                <textarea id="src-extra" rows="3"></textarea></div>
+            </div>
+            <div class="field"><label>Display name (optional)</label>
+              <input id="src-name" placeholder="Defaults to file name or host" /></div>
             <div class="dialog-actions">
-              <button id="url-cancel">Cancel</button>
-              <button class="accent" id="url-ok">Load</button>
+              <button id="src-cancel">Cancel</button>
+              <button class="accent" id="src-load">Load</button>
             </div>
           </div>
         </div>

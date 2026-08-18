@@ -75,12 +75,15 @@ export function epgHtml(): string {
           </div>
           <div class="chan-sub" style="margin-top:10px">More catalog matches</div>
           <div id="epg-more" class="editor-list"></div>
+          <p class="page-sub">Suggestions + now-playing use the catalog built from epg.monster XMLTV channel ids.</p>
         </div>
       </section>
     </div>
     <div id="epg-browser" hidden>
-      <button id="epg-browse-back">Back</button>
-      <input id="epg-browse-q" placeholder="Search catalog…" />
+      <h2>Full tvg-id catalog</h2>
+      <p class="page-sub">Search every tvg-id parsed from the XMLTV guide. Select a row to apply it to the channel you had selected.</p>
+      <button id="epg-browse-back">Back to EPG audit</button>
+      <input id="epg-browse-q" placeholder="Filter catalog by id or name…" />
       <div id="epg-browse-list" class="editor-list" style="max-height:60vh"></div>
     </div>
     <div class="dialog-backdrop" id="epg-auto-dlg">

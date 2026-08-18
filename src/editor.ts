@@ -82,7 +82,7 @@ export function editorHtml(): string {
         <div id="ed-channels" class="editor-list"></div>
       </section>
       <section class="tile editor-pane" id="ed-form">
-        <h2>Edit</h2>
+        <h2>Edit channel</h2>
         <p class="page-sub" id="ed-status"></p>
         <p class="page-sub" id="ed-empty">Select a channel.</p>
         <div id="ed-fields" hidden>
@@ -106,12 +106,15 @@ export function editorHtml(): string {
             <div id="ed-now-title"></div>
             <div id="ed-now-times" class="chan-sub"></div>
           </div>
+          <p class="page-sub">Suggestions + now playing load from the epg.monster catalog. Use timeshift when a West (or other delayed) feed shares an East EPG id.</p>
           <div class="field"><label>Logo URL (tvg-logo)</label><input id="ed-logo" /></div>
           <div class="logo-preview" id="ed-logo-preview"></div>
           <div class="field"><label>Primary stream URL (exported)</label><input id="ed-primary" /></div>
           <div class="field"><label>Notes</label><textarea id="ed-notes"></textarea></div>
-          <button class="accent" id="ed-save">Save</button>
-          <h2 style="margin-top:16px">Stream + backups</h2>
+          <button class="accent" id="ed-save">Save channel</button>
+          <button id="ed-delete">Delete channel</button>
+          <h2 style="margin-top:16px">Stream + Backups</h2>
+          <p class="page-sub">Top row is exported. Use the arrows to change order. Play to preview. Info shows the source channel name / tvg-id.</p>
           <div id="ed-streams"></div>
           <div class="field"><label>Add stream URL</label><input id="ed-new-url" /></div>
           <div class="field"><label>Label</label><input id="ed-new-label" placeholder="e.g. IPTOR" /></div>
@@ -345,7 +348,7 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
         await invoke("add_stream", { managedId: ch.id, url: primary, label: "primary" });
         draft = false;
       }
-      toast("Saved.");
+      toast("Channel saved");
       selected = await invoke("get_managed", { id: ch.id });
       group = selected?.groupTitle ?? group;
       const status = page.querySelector("#ed-status")!;
@@ -356,6 +359,23 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     }
   });
 
+  page.querySelector("#ed-delete")!.addEventListener("click", async () => {
+    if (!selected) return;
+    if (draft) {
+      draft = false;
+      selected = null;
+      page.querySelector("#ed-status")!.textContent = "Draft discarded.";
+      await paintForm();
+      return;
+    }
+    try {
+      await invoke("delete_managed", { id: selected.id });
+      selected = null;
+      await reload();
+    } catch (e) {
+      toast(String(e));
+    }
+  });
   page.querySelector("#ed-refresh")!.addEventListener("click", () => void reload());
   page.querySelector("#ed-load")!.addEventListener("click", async () => {
     try {
