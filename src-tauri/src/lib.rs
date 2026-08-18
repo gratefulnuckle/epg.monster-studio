@@ -8,6 +8,7 @@ use studio_core::models::{
     ChannelEntry, EpgSuggestion, ManagedChannel, NowPlaying, PlaylistSource, StreamVariant,
 };
 use studio_core::paths::{app_data_directory, database_path};
+use studio_core::audit;
 use studio_core::epg;
 use studio_core::logo;
 use studio_core::export::{export_all, export_visible_only};
@@ -21,6 +22,7 @@ use tauri::Manager;
 
 struct AppState {
     store: Mutex<SqliteStore>,
+    audit: Mutex<audit::ProcessStore>,
 }
 
 #[derive(Serialize)]
@@ -105,6 +107,12 @@ impl From<ChannelEntry> for ChannelDto {
 
 fn lock_store<'a>(state: &'a tauri::State<'a, AppState>) -> Result<std::sync::MutexGuard<'a, SqliteStore>, String> {
     state.store.lock().map_err(|e| e.to_string())
+}
+
+fn lock_audit<'a>(
+    state: &'a tauri::State<'a, AppState>,
+) -> Result<std::sync::MutexGuard<'a, audit::ProcessStore>, String> {
+    state.audit.lock().map_err(|e| e.to_string())
 }
 
 fn app_root(app: &tauri::AppHandle) -> std::path::PathBuf {
@@ -744,6 +752,118 @@ fn logo_search_urls(name: String) -> (String, String, String) {
 }
 
 #[tauri::command]
+fn audit_snapshot(state: tauri::State<AppState>) -> Result<audit::AuditSnapshot, String> {
+    let process = lock_audit(&state)?;
+    audit::snapshot(&process).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn audit_begin(
+    state: tauri::State<AppState>,
+    visible_only: bool,
+    auto_swap: bool,
+    channel_ids: Option<Vec<String>>,
+) -> Result<audit::AuditJob, String> {
+    let store = lock_store(&state)?;
+    let process = lock_audit(&state)?;
+    if let Ok(Some(job)) = process.load_job() {
+        if job.state == "running" {
+            return Err("Audit already running.".into());
+        }
+    }
+    let settings = store.load_settings().map_err(|e| e.to_string())?;
+    audit::begin_job(
+        &store,
+        &process,
+        &settings,
+        auto_swap,
+        visible_only,
+        channel_ids.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn audit_next(state: tauri::State<AppState>) -> Result<audit::AuditStep, String> {
+    let store = lock_store(&state)?;
+    let process = lock_audit(&state)?;
+    let settings = store.load_settings().map_err(|e| e.to_string())?;
+    audit::next_step(&store, &process, &settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn audit_set_state(state: tauri::State<AppState>, next: String) -> Result<Option<audit::AuditJob>, String> {
+    let process = lock_audit(&state)?;
+    let Some(mut job) = process.load_job().map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    match next.as_str() {
+        "paused" => {
+            job.state = "paused".into();
+        }
+        "running" => {
+            if !job.has_remaining() {
+                return Err("Nothing to resume.".into());
+            }
+            job.state = "running".into();
+            job.pid = std::process::id();
+        }
+        "cancelled" => {
+            job.state = "cancelled".into();
+            job.finished_at = Some(audit::now_iso());
+        }
+        _ => return Err("unknown audit state".into()),
+    }
+    process.update_job(&job).map_err(|e| e.to_string())?;
+    Ok(Some(job))
+}
+
+#[tauri::command]
+fn audit_discard(state: tauri::State<AppState>) -> Result<(), String> {
+    lock_audit(&state)?.clear().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn audit_undo(state: tauri::State<AppState>) -> Result<bool, String> {
+    lock_store(&state)?
+        .undo_last_swap(None)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn audit_today_groups(state: tauri::State<AppState>) -> Result<(String, Vec<String>, Vec<String>), String> {
+    let store = lock_store(&state)?;
+    let settings = store.load_settings().map_err(|e| e.to_string())?;
+    let day = audit::today_name();
+    let plan = audit::parse_weekly(&settings.weekly_audit_json);
+    let groups = audit::groups_for(&plan, &day);
+    let set: std::collections::HashSet<_> = groups.iter().map(|g| g.to_ascii_lowercase()).collect();
+    let ids = store
+        .list_managed(None)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|c| set.contains(&c.group_title.to_ascii_lowercase()))
+        .map(|c| c.id)
+        .collect();
+    Ok((day, groups, ids))
+}
+
+#[tauri::command]
+fn audit_mark_today_ran(state: tauri::State<AppState>) -> Result<(), String> {
+    let store = lock_store(&state)?;
+    let mut settings = store.load_settings().map_err(|e| e.to_string())?;
+    settings.weekly_audit_last_run = audit::day_key();
+    store.save_settings(&settings).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn audit_results(state: tauri::State<AppState>, job_id: Option<String>) -> Result<Vec<audit::AuditResult>, String> {
+    lock_store(&state)?
+        .list_audit_results(job_id.as_deref(), 4000)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn epg_search_images_url(name: String) -> String {
     let q = if name.trim().is_empty() {
         "channel logo".into()
@@ -757,6 +877,7 @@ fn epg_search_images_url(name: String) -> String {
 pub fn run() {
     let db = database_path();
     let store = SqliteStore::open(&db).expect("open studio database");
+    let audit_store = audit::ProcessStore::open(None).expect("open auditprocess database");
     let _ = app_data_directory();
 
     tauri::Builder::default()
@@ -764,6 +885,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             store: Mutex::new(store),
+            audit: Mutex::new(audit_store),
         })
         .invoke_handler(tauri::generate_handler![
             get_studio_info,
@@ -812,6 +934,15 @@ pub fn run() {
             logo_save_one,
             logo_save_tracker,
             logo_search_urls,
+            audit_snapshot,
+            audit_begin,
+            audit_next,
+            audit_set_state,
+            audit_discard,
+            audit_undo,
+            audit_today_groups,
+            audit_mark_today_ran,
+            audit_results,
         ])
         .run(tauri::generate_context!())
         .expect("error while running epg.monster studio");

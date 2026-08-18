@@ -907,6 +907,193 @@ impl SqliteStore {
             .conn
             .query_row("SELECT COUNT(*) FROM epg_catalog", [], |r| r.get(0))?)
     }
+
+    pub fn list_all_variants(&self) -> Result<Vec<StreamVariant>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, managed_channel_id, url, label, source_entry_id, visibility, priority,
+                    origin_name, origin_tvg_id
+             FROM stream_variants ORDER BY managed_channel_id, priority",
+        )?;
+        let rows = stmt.query_map([], read_variant)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn get_variant(&self, id: &str) -> Result<Option<StreamVariant>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, managed_channel_id, url, label, source_entry_id, visibility, priority,
+                    origin_name, origin_tvg_id
+             FROM stream_variants WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], read_variant)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn insert_audit_result(&self, r: &crate::audit::AuditResult) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO audit_results (
+                id, target_type, target_id, ok, error, latency_ms, engine, probed_at,
+                grade, width, height, fps, aspect_ratio, video_codec, audio_codec,
+                job_id, channel_id, channel_name, group_title, tvg_id, error_class)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+            params![
+                r.id,
+                r.target_type,
+                r.target_id,
+                r.ok as i32,
+                r.error,
+                r.latency_ms,
+                r.engine,
+                r.probed_at,
+                r.grade,
+                r.width,
+                r.height,
+                r.fps,
+                r.aspect_ratio,
+                r.video_codec,
+                r.audio_codec,
+                r.job_id,
+                r.channel_id,
+                r.channel_name,
+                r.group_title,
+                r.tvg_id,
+                r.error_class
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_audit_results(&self, job_id: Option<&str>, limit: i32) -> Result<Vec<crate::audit::AuditResult>, StoreError> {
+        let sql = if job_id.is_some() {
+            "SELECT id, target_type, target_id, ok, error, latency_ms, engine, probed_at,
+                    grade, width, height, fps, aspect_ratio, video_codec, audio_codec,
+                    job_id, channel_id, channel_name, group_title, tvg_id, error_class
+             FROM audit_results WHERE job_id = ?1 ORDER BY probed_at, id LIMIT ?2"
+        } else {
+            "SELECT id, target_type, target_id, ok, error, latency_ms, engine, probed_at,
+                    grade, width, height, fps, aspect_ratio, video_codec, audio_codec,
+                    job_id, channel_id, channel_name, group_title, tvg_id, error_class
+             FROM audit_results ORDER BY probed_at DESC, id DESC LIMIT ?1"
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let map = |row: &rusqlite::Row<'_>| {
+            Ok(crate::audit::AuditResult {
+                id: row.get(0)?,
+                target_type: row.get(1)?,
+                target_id: row.get(2)?,
+                ok: row.get::<_, i32>(3)? != 0,
+                error: row.get(4)?,
+                latency_ms: row.get(5)?,
+                engine: row.get(6)?,
+                probed_at: row.get(7)?,
+                grade: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                width: row.get(9)?,
+                height: row.get(10)?,
+                fps: row.get(11)?,
+                aspect_ratio: row.get(12)?,
+                video_codec: row.get(13)?,
+                audio_codec: row.get(14)?,
+                job_id: row.get(15)?,
+                channel_id: row.get(16)?,
+                channel_name: row.get(17)?,
+                group_title: row.get(18)?,
+                tvg_id: row.get(19)?,
+                error_class: row.get(20)?,
+            })
+        };
+        let rows = if let Some(id) = job_id {
+            stmt.query_map(params![id, limit], map)?
+        } else {
+            stmt.query_map(params![limit], map)?
+        };
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn update_variant_audit(&self, variant_id: &str, ok: bool, at: &str) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE stream_variants SET last_audit_ok = ?1, last_audit_at = ?2 WHERE id = ?3",
+            params![ok as i32, at, variant_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn swap_visible(
+        &self,
+        managed_id: &str,
+        from_variant_id: &str,
+        to_variant_id: &str,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE stream_variants SET visibility='hidden_backup' WHERE managed_channel_id=?1",
+            params![managed_id],
+        )?;
+        tx.execute(
+            "UPDATE stream_variants SET visibility='visible' WHERE id=?1",
+            params![to_variant_id],
+        )?;
+        tx.execute(
+            "INSERT INTO swap_undo_log (id, managed_channel_id, from_variant_id, to_variant_id, reason, created_at, undone_at)
+             VALUES (?1,?2,?3,?4,?5,?6,NULL)",
+            params![
+                uuid::Uuid::new_v4().simple().to_string(),
+                managed_id,
+                from_variant_id,
+                to_variant_id,
+                reason,
+                time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn undo_last_swap(&self, managed_id: Option<&str>) -> Result<bool, StoreError> {
+        let row = if let Some(mc) = managed_id {
+            self.conn.query_row(
+                "SELECT id, managed_channel_id, from_variant_id FROM swap_undo_log
+                 WHERE undone_at IS NULL AND managed_channel_id=?1
+                 ORDER BY created_at DESC LIMIT 1",
+                params![mc],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+            )
+        } else {
+            self.conn.query_row(
+                "SELECT id, managed_channel_id, from_variant_id FROM swap_undo_log
+                 WHERE undone_at IS NULL
+                 ORDER BY created_at DESC LIMIT 1",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+            )
+        };
+        let Ok((log_id, mc, from_id)) = row else {
+            return Ok(false);
+        };
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE stream_variants SET visibility='hidden_backup' WHERE managed_channel_id=?1",
+            params![mc],
+        )?;
+        if !from_id.is_empty() {
+            tx.execute(
+                "UPDATE stream_variants SET visibility='visible' WHERE id=?1",
+                params![from_id],
+            )?;
+        }
+        tx.execute(
+            "UPDATE swap_undo_log SET undone_at=?1 WHERE id=?2",
+            params![
+                time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default(),
+                log_id
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
 }
 
 fn read_managed(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedChannel> {

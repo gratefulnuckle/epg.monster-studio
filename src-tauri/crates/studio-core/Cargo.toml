@@ -15,7 +15,7 @@ uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 dirs = "6"
 ureq = { version = "2", default-features = false, features = ["tls"] }
-time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+time = { version = "0.3", features = ["formatting", "parsing", "macros", "local-offset"] }
 quick-xml = "0.37"
 flate2 = "1"
 

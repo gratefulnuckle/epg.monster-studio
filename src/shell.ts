@@ -3,6 +3,7 @@ import { api, type Channel, type Source } from "./api";
 import { editorHtml, mountEditor } from "./editor";
 import { epgHtml, mountEpg } from "./epg";
 import { logoHtml, mountLogo } from "./logo";
+import { auditHtml, mountAudit } from "./audit";
 
 export type NavId =
   | "audit"
@@ -93,6 +94,7 @@ export function mountShell(root: HTMLElement): void {
     if (id === "editor") void mountEditor(page, showToast);
     if (id === "epg") void mountEpg(page, showToast);
     if (id === "logoaudit") void mountLogo(page, showToast);
+    if (id === "autoaudit") void mountAudit(page, showToast);
   };
 
   root.querySelectorAll<HTMLButtonElement>("[data-nav]").forEach((btn) => {
@@ -350,22 +352,7 @@ function pageHtml(id: NavId): string {
     case "logoaudit":
       return logoHtml();
     case "autoaudit":
-      return `
-        <h1 class="page-title">Stream Audit</h1>
-        <p class="page-sub">Serial stream probes (ffmpeg + ffprobe). Live streams that only show a known “channel is offline” card fail as an offline slate.
-        The full result list is kept if you leave this page. Pause / resume survives a crash via auditprocess.db.</p>
-        <div>
-          <button class="accent">Start (all variants)</button>
-          <button>Visible only</button>
-          <button>Audit specific channels…</button>
-          <button>Run today's groups</button>
-          <button disabled>Pause</button>
-          <button disabled>Resume</button>
-          <button disabled>Cancel</button>
-          <button>Undo last swap</button>
-          <label class="check"><input type="checkbox" checked /> Auto-swap on fail</label>
-          <button># Results</button>
-        </div>`;
+      return auditHtml();
     case "output":
       return `
         <h1 class="page-title">Managed Output</h1>

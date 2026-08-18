@@ -570,6 +570,66 @@ input.tvg-ok {
   flex-shrink: 0;
 }
 
+.audit-feed {
+  background: #12121a;
+  border: 1px solid var(--studio-stroke);
+  border-radius: 10px;
+  min-height: 360px;
+  max-height: calc(100vh - 220px);
+  overflow: auto;
+  padding: 8px;
+}
+
+.audit-header {
+  background: #1e1e2a;
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin: 8px 0 4px;
+  font-weight: 600;
+}
+
+.audit-card {
+  display: grid;
+  grid-template-columns: 40px 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+}
+
+.grade-badge {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  color: #111;
+}
+
+.grade-bars {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  height: 140px;
+  margin: 8px 0;
+}
+
+.grade-bar {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 0;
+}
+
+.grade-bar .bar {
+  width: 28px;
+  min-height: 4px;
+  border-radius: 4px 4px 0 0;
+}
+
 .stream-row {
   display: grid;
   grid-template-columns: auto 1fr auto auto auto auto;
