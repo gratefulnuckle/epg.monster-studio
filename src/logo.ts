@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { bindVirtualList, type VirtualList } from "./virtual";
 
 export type LogoIssue = {
   managedChannelId: string;
@@ -101,6 +102,8 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
   let group = "";
   let selected: LogoIssue | null = null;
   let issuesOnly = true;
+  let groupVirt: VirtualList<string> | null = null;
+  let chanVirt: VirtualList<LogoIssue> | null = null;
   let saveItems: SaveItem[] = [];
   let saveRoot = "";
   let saving = false;
@@ -132,46 +135,55 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
 
   const paintGroups = () => {
     const titles = [...new Set(rows.map((r) => r.groupTitle))];
-    const el = page.querySelector("#lg-groups")!;
+    const el = page.querySelector<HTMLElement>("#lg-groups")!;
+    if (!group && titles[0]) group = titles[0];
+    groupVirt?.destroy();
     el.innerHTML = "";
-    for (const t of titles) {
-      const n = rows.filter((r) => r.groupTitle === t && r.issue).length;
-      const b = document.createElement("button");
-      b.className = "group-row" + (t === group ? " active" : "");
-      b.innerHTML = `${esc(t)}${n ? `<span class="issue-n"> ${n} issues</span>` : ""}`;
-      b.addEventListener("click", () => {
-        group = t;
-        selected = null;
-        paintGroups();
-        paintChannels();
-        paintDetail();
-      });
-      el.appendChild(b);
-    }
-    if (!group && titles[0]) {
-      group = titles[0];
-      paintGroups();
-    } else paintChannels();
+    groupVirt = bindVirtualList({
+      scroller: el,
+      rowHeight: 36,
+      renderRow: (t) => {
+        const n = rows.filter((r) => r.groupTitle === t && r.issue).length;
+        const b = document.createElement("button");
+        b.className = "group-row" + (t === group ? " active" : "");
+        b.innerHTML = `${esc(t)}${n ? `<span class="issue-n"> ${n} issues</span>` : ""}`;
+        b.addEventListener("click", () => {
+          group = t;
+          selected = null;
+          paintGroups();
+          paintDetail();
+        });
+        return b;
+      },
+    });
+    groupVirt.setItems(titles);
+    paintChannels();
   };
 
   const paintChannels = () => {
-    const el = page.querySelector("#lg-channels")!;
-    el.innerHTML = "";
+    const el = page.querySelector<HTMLElement>("#lg-channels")!;
     const list = rows.filter((r) => r.groupTitle === group && (!issuesOnly || r.issue));
-    for (const r of list) {
-      const b = document.createElement("button");
-      b.className = "chan-pick" + (selected?.managedChannelId === r.managedChannelId ? " active" : "");
-      b.innerHTML = `<span class="lg-thumb">${r.issue ? `<span class="broken">!</span>` : ""}</span>
+    if (!chanVirt) {
+      chanVirt = bindVirtualList({
+        scroller: el,
+        rowHeight: 48,
+        renderRow: (r) => {
+          const b = document.createElement("button");
+          b.className = "chan-pick" + (selected?.managedChannelId === r.managedChannelId ? " active" : "");
+          b.innerHTML = `<span class="lg-thumb">${r.issue ? `<span class="broken">!</span>` : ""}</span>
         <span><span class="chan-name">${esc(r.channelName)}</span>
         <span class="chan-sub">${esc(r.tvgId ?? "")}</span></span>
         ${r.issue ? `<span class="status-pill">${LABEL[r.issue] ?? r.issue}</span>` : ""}`;
-      b.addEventListener("click", () => {
-        selected = r;
-        paintChannels();
-        paintDetail();
+          b.addEventListener("click", () => {
+            selected = r;
+            paintChannels();
+            paintDetail();
+          });
+          return b;
+        },
       });
-      el.appendChild(b);
     }
+    chanVirt.setItems(list);
   };
 
   const paintDetail = () => {

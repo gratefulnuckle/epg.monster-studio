@@ -145,37 +145,47 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
   let selected: Managed | null = null;
   let draft = false;
   let chanVirt: VirtualList<Managed> | null = null;
+  let groupVirt: VirtualList<{ title: string; count: number }> | null = null;
 
   const reload = async () => {
     const groups = await invoke<{ title: string; count: number }[]>("list_managed_groups");
-    const gEl = page.querySelector("#ed-groups")!;
-    gEl.innerHTML = "";
+    const gEl = page.querySelector<HTMLElement>("#ed-groups")!;
     const dl = page.querySelector("#ed-group-list")!;
     dl.innerHTML = "";
     let total = 0;
     for (const g of groups) {
       total += g.count;
-      const b = document.createElement("button");
-      b.className = "group-row" + (g.title === group ? " active" : "");
-      b.textContent = `${g.title}  (${g.count})`;
-      b.addEventListener("click", () => {
-        group = g.title;
-        void loadChannels();
-      });
-      b.addEventListener("contextmenu", (ev) => {
-        ev.preventDefault();
-        const name = window.prompt("Rename group", g.title);
-        if (name == null) return;
-        void invoke("rename_managed_group", { oldName: g.title, newName: name }).then(reload);
-      });
-      b.addEventListener("dblclick", () => b.dispatchEvent(new Event("contextmenu")));
-      gEl.appendChild(b);
       const opt = document.createElement("option");
       opt.value = g.title;
       dl.appendChild(opt);
     }
+    groupVirt?.destroy();
+    gEl.innerHTML = "";
+    groupVirt = bindVirtualList({
+      scroller: gEl,
+      rowHeight: 36,
+      renderRow: (g) => {
+        const b = document.createElement("button");
+        b.className = "group-row" + (g.title === group ? " active" : "");
+        b.textContent = `${g.title}  (${g.count})`;
+        b.addEventListener("click", () => {
+          group = g.title;
+          groupVirt?.setItems(groups);
+          void loadChannels();
+        });
+        b.addEventListener("contextmenu", (ev) => {
+          ev.preventDefault();
+          const name = window.prompt("Rename group", g.title);
+          if (name == null) return;
+          void invoke("rename_managed_group", { oldName: g.title, newName: name }).then(reload);
+        });
+        b.addEventListener("dblclick", () => b.dispatchEvent(new Event("contextmenu")));
+        return b;
+      },
+    });
     page.querySelector("#ed-count")!.textContent = `${total} channels`;
     if (!group && groups[0]) group = groups[0].title;
+    groupVirt.setItems(groups);
     await loadChannels();
   };
 

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { bindVirtualList, type VirtualList } from "./virtual";
 
 export type AuditRow = {
   managedChannelId: string;
@@ -113,6 +114,8 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
   let group = "";
   let selected: AuditRow | null = null;
   let showMatched = false;
+  let groupVirt: VirtualList<string> | null = null;
+  let chanVirt: VirtualList<AuditRow> | null = null;
 
   try {
     const url = await invoke<string>("epg_guide_url");
@@ -134,48 +137,54 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
 
   const paintGroups = () => {
     const titles = [...new Set(rows.map((r) => r.groupTitle))];
-    const el = page.querySelector("#epg-groups")!;
+    const el = page.querySelector<HTMLElement>("#epg-groups")!;
+    if (!group && titles[0]) group = titles[0];
+    groupVirt?.destroy();
     el.innerHTML = "";
-    for (const t of titles) {
-      const issues = issuesIn(t);
-      const b = document.createElement("button");
-      b.className = "group-row" + (t === group ? " active" : "");
-      b.innerHTML = `${esc(t)}${issues ? `<span class="issue-n"> ${issues} issues</span>` : ""}`;
-      b.addEventListener("click", () => {
-        group = t;
-        selected = null;
-        paintGroups();
-        paintChannels();
-        paintDetail();
-      });
-      el.appendChild(b);
-    }
-    if (!group && titles[0]) {
-      group = titles[0];
-      paintGroups();
-      paintChannels();
-    } else {
-      paintChannels();
-    }
+    groupVirt = bindVirtualList({
+      scroller: el,
+      rowHeight: 36,
+      renderRow: (t) => {
+        const issues = issuesIn(t);
+        const b = document.createElement("button");
+        b.className = "group-row" + (t === group ? " active" : "");
+        b.innerHTML = `${esc(t)}${issues ? `<span class="issue-n"> ${issues} issues</span>` : ""}`;
+        b.addEventListener("click", () => {
+          group = t;
+          selected = null;
+          paintGroups();
+          paintDetail();
+        });
+        return b;
+      },
+    });
+    groupVirt.setItems(titles);
+    paintChannels();
   };
 
   const paintChannels = () => {
-    const el = page.querySelector("#epg-channels")!;
-    el.innerHTML = "";
+    const el = page.querySelector<HTMLElement>("#epg-channels")!;
     const list = rows.filter((r) => r.groupTitle === group && (showMatched || r.status !== "matched"));
-    for (const r of list) {
-      const b = document.createElement("button");
-      b.className = "chan-pick" + (selected?.managedChannelId === r.managedChannelId ? " active" : "");
-      b.innerHTML = `<span><span class="chan-name">${esc(r.channelName)}</span>
+    if (!chanVirt) {
+      chanVirt = bindVirtualList({
+        scroller: el,
+        rowHeight: 48,
+        renderRow: (r) => {
+          const b = document.createElement("button");
+          b.className = "chan-pick" + (selected?.managedChannelId === r.managedChannelId ? " active" : "");
+          b.innerHTML = `<span><span class="chan-name">${esc(r.channelName)}</span>
         <span class="chan-sub">${esc(r.currentTvgId ?? "—")}</span></span>
         <span class="status-pill">${statusLabel(r.status)}</span>`;
-      b.addEventListener("click", () => {
-        selected = r;
-        paintChannels();
-        paintDetail();
+          b.addEventListener("click", () => {
+            selected = r;
+            paintChannels();
+            paintDetail();
+          });
+          return b;
+        },
       });
-      el.appendChild(b);
     }
+    chanVirt.setItems(list);
   };
 
   const paintDetail = () => {

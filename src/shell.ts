@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, type Channel, type Source } from "./api";
+import { api, type Channel, type Group, type Source } from "./api";
 import { editorHtml, mountEditor } from "./editor";
 import { epgHtml, mountEpg } from "./epg";
 import { logoHtml, mountLogo } from "./logo";
@@ -202,7 +202,7 @@ function wireCaptionButtons(root: HTMLElement): void {
 
 async function mountSources(page: HTMLElement, toast: (s: string) => void): Promise<void> {
   const tabs = page.querySelector("#source-tabs")!;
-  const groupsEl = page.querySelector("#source-groups")!;
+  const groupsEl = page.querySelector<HTMLElement>("#source-groups")!;
   const channelsEl = page.querySelector<HTMLElement>("#source-channels")!;
   const empty = page.querySelector<HTMLElement>("#source-empty")!;
   const workspace = page.querySelector<HTMLElement>("#source-workspace")!;
@@ -214,6 +214,8 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
   let hasManaged = false;
   let lastChans: Channel[] = [];
   let chanVirt: VirtualList<Channel> | null = null;
+  let groupVirt: VirtualList<Group> | null = null;
+  let activeGroup = "";
 
   const paintTabs = () => {
     tabs.innerHTML = "";
@@ -254,20 +256,31 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
   const loadGroups = async () => {
     if (!activeId) return;
     const groups = await api.listGroups(activeId);
-    groupsEl.innerHTML = "";
-    for (const g of groups) {
-      const row = document.createElement("button");
-      row.className = "group-row";
-      row.textContent = `${g.title}  (${g.count})`;
-      row.addEventListener("click", async () => {
-        groupsEl.querySelectorAll(".group-row").forEach((el) => el.classList.remove("active"));
-        row.classList.add("active");
-        const chans = await api.listChannels(activeId, g.title);
-        paintChannels(chans, false);
-      });
-      groupsEl.appendChild(row);
+    if (!activeGroup || !groups.some((g) => g.title === activeGroup)) {
+      activeGroup = groups[0]?.title ?? "";
     }
-    if (groups[0]) (groupsEl.firstElementChild as HTMLButtonElement | null)?.click();
+    groupVirt?.destroy();
+    groupsEl.innerHTML = "";
+    groupVirt = bindVirtualList({
+      scroller: groupsEl,
+      rowHeight: 36,
+      renderRow: (g) => {
+        const row = document.createElement("button");
+        row.className = "group-row" + (g.title === activeGroup ? " active" : "");
+        row.textContent = `${g.title}  (${g.count})`;
+        row.addEventListener("click", async () => {
+          activeGroup = g.title;
+          groupVirt?.setItems(groups);
+          const chans = await api.listChannels(activeId, g.title);
+          paintChannels(chans, false);
+        });
+        return row;
+      },
+    });
+    groupVirt.setItems(groups);
+    if (activeGroup) {
+      paintChannels(await api.listChannels(activeId, activeGroup), false);
+    }
   };
 
   const paintChannels = (chans: Channel[], isSearch: boolean) => {
@@ -332,7 +345,7 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
     }
   });
 
-  page.querySelector("#add-file")?.addEventListener("click", async () => {
+  const addFile = async () => {
     try {
       const src = await api.pickSourceFile();
       if (src) {
@@ -342,7 +355,9 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
     } catch (e) {
       toast(String(e));
     }
-  });
+  };
+  page.querySelector("#add-file")?.addEventListener("click", () => void addFile());
+  page.querySelector("#empty-add")?.addEventListener("click", () => void addFile());
   page.querySelector("#add-url-open")?.addEventListener("click", () => urlDlg.classList.add("open"));
   page.querySelector("#url-cancel")?.addEventListener("click", () => urlDlg.classList.remove("open"));
   page.querySelector("#url-ok")?.addEventListener("click", async () => {
@@ -542,12 +557,16 @@ function pageHtml(id: NavId): string {
         </div>
         <div class="empty" id="source-empty">
           <div class="glyph">☰</div>
-          <p>Add source…</p>
+          <p>Add a playlist source to get started</p>
+          <button class="accent" id="empty-add">Add source…</button>
         </div>
         <div class="source-workspace" id="source-workspace">
           <div class="tabs" id="source-tabs"></div>
           <div class="source-split">
-            <div class="groups" id="source-groups"></div>
+            <div class="groups">
+              <div class="groups-head">Groups</div>
+              <div class="groups-body" id="source-groups"></div>
+            </div>
             <div class="channels" id="source-channels"></div>
           </div>
         </div>

@@ -553,8 +553,23 @@ textarea {
 }
 
 .groups {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   background: #12121a;
   border-right: 1px solid var(--studio-stroke);
+}
+
+.groups-head {
+  flex-shrink: 0;
+  padding: 10px 12px;
+  font-weight: 600;
+}
+
+.groups-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .group-row {
@@ -564,6 +579,7 @@ textarea {
   background: transparent;
   border: 0;
   border-radius: 0;
+  padding: 8px 12px;
 }
 
 .group-row.active {
