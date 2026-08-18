@@ -76,11 +76,26 @@ textarea {
 }
 
 .titlebar {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  padding: 0 0 0 16px;
   border-bottom: 1px solid #1c1c24;
   user-select: none;
+}
+
+.titlebar-side {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 100%;
+}
+
+.titlebar-left {
+  padding-left: 16px;
+}
+
+.titlebar-right {
+  justify-content: flex-end;
 }
 
 .titlebar-drag {
@@ -102,13 +117,12 @@ textarea {
 
 .search {
   width: 320px;
-  margin: 0 12px;
+  justify-self: center;
 }
 
 .caption {
   display: flex;
   height: 100%;
-  margin-left: 8px;
 }
 
 .caption-btn {

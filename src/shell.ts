@@ -36,15 +36,17 @@ export function mountShell(root: HTMLElement): void {
   root.innerHTML = `
     <div class="shell">
       <header class="titlebar">
-        <div class="titlebar-drag" data-tauri-drag-region>
+        <div class="titlebar-side titlebar-left" data-tauri-drag-region>
           <span class="brand">epg.monster studio</span>
         </div>
         <input class="search" id="search" placeholder="Search name, group, tvg-id, URL…" />
-        <div class="titlebar-drag titlebar-spacer" data-tauri-drag-region></div>
-        <div class="caption">
-          <button type="button" class="caption-btn" id="win-min" title="Minimize" aria-label="Minimize">&#xE921;</button>
-          <button type="button" class="caption-btn" id="win-max" title="Maximize" aria-label="Maximize">&#xE922;</button>
-          <button type="button" class="caption-btn" id="win-close" title="Close" aria-label="Close">&#xE8BB;</button>
+        <div class="titlebar-side titlebar-right">
+          <div class="titlebar-drag titlebar-spacer" data-tauri-drag-region></div>
+          <div class="caption">
+            <button type="button" class="caption-btn" id="win-min" title="Minimize" aria-label="Minimize">&#xE921;</button>
+            <button type="button" class="caption-btn" id="win-max" title="Maximize" aria-label="Maximize">&#xE922;</button>
+            <button type="button" class="caption-btn" id="win-close" title="Close" aria-label="Close">&#xE8BB;</button>
+          </div>
         </div>
       </header>
       <div class="workspace">
