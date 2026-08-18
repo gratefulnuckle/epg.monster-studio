@@ -198,6 +198,15 @@ textarea {
   padding: 8px 0 12px;
 }
 
+.nav-spacer {
+  height: 40px;
+  flex-shrink: 0;
+}
+
+.workspace.pane-closed .nav-spacer {
+  display: none;
+}
+
 .nav-logo {
   display: block;
   margin: 8px 10px 16px;

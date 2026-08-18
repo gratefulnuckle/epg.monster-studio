@@ -56,6 +56,7 @@ export function mountShell(root: HTMLElement): { toast: (s: string) => void } {
       </header>
       <div class="workspace">
         <aside class="nav">
+          <div class="nav-spacer" aria-hidden="true"></div>
           <button class="nav-logo" id="about" title="About epg.monster studio">
             <img src="/logo.png" alt="epg.monster studio" />
           </button>
