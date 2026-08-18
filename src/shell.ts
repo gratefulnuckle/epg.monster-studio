@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { api, type Channel, type Source } from "./api";
 import { editorHtml, mountEditor } from "./editor";
+import { epgHtml, mountEpg } from "./epg";
 
 export type NavId =
   | "audit"
@@ -89,6 +90,7 @@ export function mountShell(root: HTMLElement): void {
     page.innerHTML = pageHtml(id);
     if (id === "audit") void mountSources(page, showToast);
     if (id === "editor") void mountEditor(page, showToast);
+    if (id === "epg") void mountEpg(page, showToast);
   };
 
   root.querySelectorAll<HTMLButtonElement>("[data-nav]").forEach((btn) => {
@@ -342,9 +344,7 @@ function pageHtml(id: NavId): string {
     case "editor":
       return editorHtml();
     case "epg":
-      return `
-        <h1 class="page-title">EPG Audit</h1>
-        <p class="page-sub">Fetch epg.monster XMLTV only. Catalog is the &lt;channel&gt; tvg-ids in that file. Exact + fuzzy match.</p>`;
+      return epgHtml();
     case "logoaudit":
       return `
         <h1 class="page-title">Logo Audit</h1>

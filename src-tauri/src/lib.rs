@@ -8,7 +8,9 @@ use studio_core::models::{
     ChannelEntry, EpgSuggestion, ManagedChannel, NowPlaying, PlaylistSource, StreamVariant,
 };
 use studio_core::paths::{app_data_directory, database_path};
+use studio_core::epg;
 use studio_core::export::{export_all, export_visible_only};
+use studio_core::models::{CatalogEntry, EpgAuditRow};
 use studio_core::player;
 use studio_core::settings::AppSettings;
 use studio_core::store::SqliteStore;
@@ -466,6 +468,158 @@ fn save_settings(state: tauri::State<AppState>, settings: AppSettings) -> Result
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn epg_catalog_count(state: tauri::State<AppState>) -> Result<i32, String> {
+    lock_store(&state)?.catalog_count().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn epg_guide_url(state: tauri::State<AppState>) -> Result<String, String> {
+    let s = lock_store(&state)?.load_settings().map_err(|e| e.to_string())?;
+    Ok(epg::resolve_xml_urls(&s)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| epg::DEFAULT_XML_URL.into()))
+}
+
+#[tauri::command]
+fn fetch_epg_catalog(state: tauri::State<AppState>, url: Option<String>) -> Result<String, String> {
+    let store = lock_store(&state)?;
+    let settings = store.load_settings().map_err(|e| e.to_string())?;
+    let urls = if let Some(u) = url.filter(|s| !s.trim().is_empty() && !epg::is_epgshare_url(s)) {
+        vec![u]
+    } else {
+        epg::resolve_xml_urls(&settings)
+    };
+    let cache = app_data_directory().join("cache");
+    std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+    let mut all_ch = Vec::new();
+    let mut all_prog = Vec::new();
+    for u in &urls {
+        let bytes = epg::fetch_xmltv(u)?;
+        let host = u
+            .split("://")
+            .nth(1)
+            .unwrap_or(u)
+            .split('/')
+            .next()
+            .unwrap_or("epg.monster")
+            .to_string();
+        let stamp = format!("{:x}", u.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32)));
+        let path = cache.join(format!("{host}-{stamp}.xml"));
+        epg::materialize_xmltv(&bytes, &path).map_err(|e| e.to_string())?;
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        all_ch.extend(epg::parse_xmltv_channels(&text, &host));
+        all_prog.extend(epg::index_programmes_from_xml(&text));
+    }
+    let mut seen = std::collections::HashSet::new();
+    all_ch.retain(|c| seen.insert(c.tvg_id.to_ascii_lowercase()));
+    store.replace_epg_catalog(&all_ch).map_err(|e| e.to_string())?;
+    store.replace_programmes(&all_prog).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "{} catalog ids · {} programmes indexed",
+        all_ch.len(),
+        all_prog.len()
+    ))
+}
+
+#[tauri::command]
+fn rebuild_now_playing(state: tauri::State<AppState>) -> Result<String, String> {
+    let cache = app_data_directory().join("cache");
+    let mut all = Vec::new();
+    if cache.is_dir() {
+        for f in std::fs::read_dir(&cache).map_err(|e| e.to_string())? {
+            let f = f.map_err(|e| e.to_string())?.path();
+            if f.extension().and_then(|e| e.to_str()) == Some("xml") {
+                let text = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+                all.extend(epg::index_programmes_from_xml(&text));
+            }
+        }
+    }
+    lock_store(&state)?
+        .replace_programmes(&all)
+        .map_err(|e| e.to_string())?;
+    Ok(format!("Reindexed {} programmes from cache", all.len()))
+}
+
+#[tauri::command]
+fn epg_audit(state: tauri::State<AppState>) -> Result<Vec<EpgAuditRow>, String> {
+    let store = lock_store(&state)?;
+    let channels = store.list_managed(None).map_err(|e| e.to_string())?;
+    let catalog = store.list_catalog().map_err(|e| e.to_string())?;
+    Ok(epg::build_epg_audit(&channels, &catalog))
+}
+
+#[tauri::command]
+fn epg_apply(
+    state: tauri::State<AppState>,
+    managed_id: String,
+    tvg_id: String,
+    logo: Option<String>,
+    apply_logo: bool,
+) -> Result<(), String> {
+    let store = lock_store(&state)?;
+    let Some(mut ch) = store.get_managed(&managed_id).map_err(|e| e.to_string())? else {
+        return Err("channel not found".into());
+    };
+    ch.tvg_id = Some(tvg_id);
+    if apply_logo {
+        if let Some(l) = logo.filter(|s| !s.is_empty()) {
+            ch.tvg_logo = Some(l);
+        }
+    }
+    store.upsert_managed(&ch).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn epg_auto_match(
+    state: tauri::State<AppState>,
+    groups: Vec<String>,
+    min_score: f64,
+) -> Result<i32, String> {
+    let store = lock_store(&state)?;
+    let channels = store.list_managed(None).map_err(|e| e.to_string())?;
+    let catalog = store.list_catalog().map_err(|e| e.to_string())?;
+    let rows = epg::build_epg_audit(&channels, &catalog);
+    let want: std::collections::HashSet<String> = groups
+        .into_iter()
+        .map(|g| g.trim().to_ascii_lowercase())
+        .collect();
+    let mut applied = 0;
+    for row in rows {
+        if !want.contains(&row.group_title.trim().to_ascii_lowercase()) {
+            continue;
+        }
+        if !epg::should_auto_apply(&row, min_score, true) {
+            continue;
+        }
+        if !store.is_known_tvg_id(row.suggested_tvg_id.as_deref()) {
+            continue;
+        }
+        if let Some(mut ch) = store.get_managed(&row.managed_channel_id).map_err(|e| e.to_string())? {
+            ch.tvg_id = row.suggested_tvg_id;
+            store.upsert_managed(&ch).map_err(|e| e.to_string())?;
+            applied += 1;
+        }
+    }
+    Ok(applied)
+}
+
+#[tauri::command]
+fn epg_browse_catalog(state: tauri::State<AppState>) -> Result<Vec<CatalogEntry>, String> {
+    lock_store(&state)?.list_catalog().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn epg_search_images_url(name: String) -> String {
+    let q = if name.trim().is_empty() {
+        "channel logo".into()
+    } else {
+        format!("{} logo", name.trim())
+    };
+    epg::google_images_transparent_url(&q)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let db = database_path();
@@ -508,6 +662,15 @@ pub fn run() {
             clear_managed,
             load_settings,
             save_settings,
+            epg_catalog_count,
+            epg_guide_url,
+            fetch_epg_catalog,
+            rebuild_now_playing,
+            epg_audit,
+            epg_apply,
+            epg_auto_match,
+            epg_browse_catalog,
+            epg_search_images_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running epg.monster studio");

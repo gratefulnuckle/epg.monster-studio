@@ -16,6 +16,8 @@ thiserror = "2"
 dirs = "6"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+quick-xml = "0.37"
+flate2 = "1"
 
 [dev-dependencies]
 tempfile = "3"

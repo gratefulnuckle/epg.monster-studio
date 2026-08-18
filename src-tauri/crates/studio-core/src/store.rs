@@ -6,7 +6,8 @@ use rusqlite::{params, Connection};
 use thiserror::Error;
 
 use crate::models::{
-    ChannelEntry, EpgSuggestion, ManagedChannel, NowPlaying, PlaylistSource, StreamVariant,
+    CatalogEntry, ChannelEntry, EpgSuggestion, ManagedChannel, NowPlaying, PlaylistSource,
+    StreamVariant,
 };
 use crate::parser::parse_m3u;
 use crate::settings::AppSettings;
@@ -828,6 +829,83 @@ impl SqliteStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    pub fn replace_epg_catalog(&self, entries: &[CatalogEntry]) -> Result<(), StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM epg_catalog", [])?;
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        {
+            let mut ins = tx.prepare(
+                "INSERT OR REPLACE INTO epg_catalog (tvg_id, name, logo, source, section, raw_json, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
+            )?;
+            for e in entries {
+                ins.execute(params![
+                    e.tvg_id,
+                    e.name,
+                    e.logo,
+                    e.section,
+                    e.section,
+                    now
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn replace_programmes(
+        &self,
+        items: &[(String, String, String, String)],
+    ) -> Result<(), StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch("DELETE FROM epg_programmes; DELETE FROM epg_now_playing;")?;
+        let indexed = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        {
+            let mut ins = tx.prepare(
+                "INSERT OR REPLACE INTO epg_programmes (tvg_id, title, description, start_utc, stop_utc, indexed_at)
+                 VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
+            )?;
+            let mut now_ins = tx.prepare(
+                "INSERT OR REPLACE INTO epg_now_playing (tvg_id, title, description, start_utc, stop_utc, indexed_at)
+                 VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
+            )?;
+            let now = indexed.as_str();
+            for (id, title, start, stop) in items {
+                ins.execute(params![id, title, start, stop, indexed])?;
+                if start.as_str() <= now && stop.as_str() > now {
+                    now_ins.execute(params![id, title, start, stop, indexed])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_catalog(&self) -> Result<Vec<CatalogEntry>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tvg_id, name, logo, IFNULL(section,'') FROM epg_catalog ORDER BY section, name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(CatalogEntry {
+                tvg_id: row.get(0)?,
+                name: row.get(1)?,
+                logo: row.get(2)?,
+                section: row.get(3)?,
+            })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn catalog_count(&self) -> Result<i32, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM epg_catalog", [], |r| r.get(0))?)
     }
 }
 

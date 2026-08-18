@@ -546,6 +546,19 @@ input.tvg-ok {
   font-size: 12px;
 }
 
+.issue-n {
+  color: #ff6d00;
+  font-weight: 600;
+}
+
+.status-pill {
+  background: #2a2a36;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .stream-row {
   display: grid;
   grid-template-columns: auto 1fr auto auto auto auto;

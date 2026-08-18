@@ -80,6 +80,50 @@ pub struct EpgSuggestion {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct EpgAuditRow {
+    pub managed_channel_id: String,
+    pub channel_name: String,
+    pub group_title: String,
+    pub current_tvg_id: Option<String>,
+    /// matched | missing | unknown
+    pub status: String,
+    pub suggested_tvg_id: Option<String>,
+    pub suggested_name: Option<String>,
+    pub suggested_logo: Option<String>,
+    pub score: f64,
+    pub second_score: f64,
+    pub match_kind: Option<String>,
+}
+
+impl EpgAuditRow {
+    pub fn has_suggestion(&self) -> bool {
+        self.suggested_tvg_id.as_deref().is_some_and(|s| !s.is_empty())
+    }
+
+    pub fn is_unique_suggestion(&self) -> bool {
+        self.score >= 0.98 || self.score - self.second_score >= 0.10
+    }
+
+    pub fn status_label(&self) -> &'static str {
+        match self.status.as_str() {
+            "matched" => "Matched",
+            "unknown" => "Unknown ID",
+            _ => "Missing ID",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogEntry {
+    pub tvg_id: String,
+    pub name: String,
+    pub logo: Option<String>,
+    pub section: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct NowPlaying {
     pub title: String,
     pub start_local: String,
