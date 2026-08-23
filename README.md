@@ -1,4 +1,17 @@
-# epg.monster studio (v2)
+<p align="center">
+  <img src="https://epg.monster/img/logo.png" alt="epg.monster">
+</p>
+
+# epg.monster studio
+
+[![Language](https://img.shields.io/badge/language-TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Tauri](https://img.shields.io/badge/Tauri-v2-FFC131?style=for-the-badge&logo=tauri&logoColor=black)](https://tauri.app/)
+[![Windows](https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://learn.microsoft.com/windows/)
+[![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://www.kernel.org/)
+[![macOS](https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=for-the-badge)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/gratefulnuckle/epg.monster-studio?style=for-the-badge)](https://github.com/gratefulnuckle/epg.monster-studio/releases)
 
 **epg.monster studio** is a desktop app for curating IPTV playlists: load M3U/M3U8
 sources, edit a managed list with hidden backups, match EPG ids from epg.monster,
@@ -6,14 +19,8 @@ probe streams with ffmpeg, and present the list to Plex / Jellyfin / Emby / Tivi
 as a local HDHomeRun-style tuner.
 
 This tree is the **v2** app: **Tauri v2 + Rust + TypeScript**, on **Windows, Linux,
-and macOS**. Window title is always **epg.monster studio**.
-
-| | |
-|---|---|
-| Edition | `2026` |
-| Semver | `2.0.2` |
-| License | GPL-3.0 |
-| Releases | [gratefulnuckle/epg.monster-studio](https://github.com/gratefulnuckle/epg.monster-studio/releases) |
+and macOS**. Window title is always **epg.monster studio**. Edition **2026**,
+semver **2.0.2**.
 
 This is an operator tool. Use it only with sources you have the right to use.
 
