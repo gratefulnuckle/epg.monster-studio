@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
-import { api } from "./api";
+import { applyPlayGate, applyPlayerEngineValue, canPlay, playerEngineOptionsHtml } from "./capabilities";
+import { api, type ChannelAudit } from "./api";
 import { bindVirtualList, type VirtualList } from "./virtual";
+import { bindPlayerLogo } from "./logo-src";
+import { bindThreeColSplit } from "./split";
 
 export type Variant = {
   id: string;
@@ -27,6 +30,8 @@ export type Managed = {
   variants: Variant[];
   hasEpgMatch: boolean;
 };
+
+const STARTED_KEY = "studio-editor-started";
 
 const SHIFTS: { hours: number; label: string }[] = [
   { hours: 0, label: "0    ·  GMT−5  Eastern — New York, Toronto, Bogotá" },
@@ -62,27 +67,53 @@ const SHIFTS: { hours: number; label: string }[] = [
 
 export function editorHtml(): string {
   return `
-    <div class="editor-toolbar">
-      <span class="editor-title">Managed playlist</span>
-      <button class="accent" id="ed-load" title="Import your curated m3u/m3u8 as the base list">Load curated playlist…</button>
-      <button id="ed-add-from" title="Add channels that are missing from your curated list (does not auto-add stream backups)">Add channels from sources…</button>
-      <button id="ed-export">Export m3u8…</button>
-      <button id="ed-refresh">Refresh</button>
-      <button id="ed-clear" title="Remove all channels from the managed playlist">Clear</button>
-      <span class="page-sub" id="ed-count"></span>
+    <h1 class="page-title">Playlist Editor</h1>
+    <p class="page-sub">1) Load or create a curated playlist  2) Pick group → channel  3) Edit metadata / type tvg-id for EPG suggestions  4) Add stream backups manually below.  Right-click a group to rename.</p>
+    <div class="source-bar">
+      <fieldset class="player-field">
+        <legend>Video Player</legend>
+        <select id="ed-player" title="Player for Play button">
+          ${playerEngineOptionsHtml()}
+        </select>
+      </fieldset>
     </div>
-    <p class="page-sub">1) Load curated playlist  2) Pick group → channel  3) Edit metadata / type tvg-id for EPG suggestions  4) Add stream backups manually below.  Right-click a group to rename.</p>
-    <div class="editor-grid">
-      <section class="tile editor-pane">
-        <h2>Groups</h2>
-        <div id="ed-groups" class="editor-list"></div>
+    <div class="empty" id="ed-blank">
+      <div class="glyph">☰</div>
+      <p id="ed-blank-msg">Load a curated playlist to get started</p>
+      <div class="empty-actions">
+        <button class="accent" id="ed-empty-load">Load curated playlist</button>
+        <button id="ed-empty-create">Create curated playlist</button>
+      </div>
+    </div>
+    <div class="editor-workspace" id="ed-workspace" hidden>
+    <div class="tabs-row" id="ed-actions">
+      <button class="accent" id="ed-load" title="Import your curated m3u/m3u8 as the base list">Load curated playlist</button>
+      <button id="ed-add-from" title="Add channels that are missing from your curated list (does not auto-add stream backups)">Add channels from sources</button>
+      <button id="ed-export">Export m3u8</button>
+      <span class="page-sub" id="ed-count"></span>
+      <div class="source-row-actions">
+        <button type="button" class="tab-ico" id="ed-refresh" title="Refresh playlist">&#xE72C;</button>
+        <button type="button" class="tab-ico tab-del" id="ed-clear" title="Remove all channels from the managed playlist">&#xE74D;</button>
+      </div>
+    </div>
+    <div class="editor-grid editor-split" id="ed-split">
+      <section class="groups editor-pane">
+        <div class="groups-head">Groups</div>
+        <div id="ed-groups" class="groups-body"></div>
       </section>
-      <section class="tile editor-pane">
-        <h2>Channels</h2>
+      <div class="split-handle" id="ed-split-groups" title="Drag to resize groups"></div>
+      <section class="channels editor-pane">
+        <div class="chan-head no-add">
+          <span class="col-icon">Audit</span>
+          <span class="col-icon">Play</span>
+          <span>Name <button type="button" class="col-url-show" title="Show URL column">URL</button></span>
+          <button type="button" class="col-url" title="Hide URL column">URL</button>
+        </div>
         <div id="ed-channels" class="editor-list"></div>
       </section>
+      <div class="split-handle" id="ed-split-chans" title="Drag to resize channels"></div>
       <section class="tile editor-pane" id="ed-form">
-        <h2>Edit channel</h2>
+        <div class="groups-head">Edit channel</div>
         <p class="page-sub" id="ed-status"></p>
         <p class="page-sub" id="ed-empty">Select a channel.</p>
         <div id="ed-fields" hidden>
@@ -113,26 +144,50 @@ export function editorHtml(): string {
           <div class="field"><label>Notes</label><textarea id="ed-notes"></textarea></div>
           <button class="accent" id="ed-save">Save channel</button>
           <button id="ed-delete">Delete channel</button>
-          <h2 style="margin-top:16px">Stream + Backups</h2>
-          <p class="page-sub">Top row is exported. Use the arrows to change order. Play to preview. Info shows the source channel name / tvg-id.</p>
-          <div id="ed-streams"></div>
-          <div class="field"><label>Add stream URL</label><input id="ed-new-url" /></div>
-          <div class="field"><label>Label</label><input id="ed-new-label" placeholder="e.g. IPTOR" /></div>
-          <button id="ed-add-stream">Add stream</button>
+          <div class="stream-backups">
+            <h2>Stream + Backups</h2>
+            <p class="page-sub">Top row is exported. Use the arrows to change order. Play to preview. Info shows the source channel name / tvg-id.</p>
+            <div id="ed-streams"></div>
+            <div class="field"><label>Add stream URL</label><input id="ed-new-url" /></div>
+            <div class="field"><label>Label</label><input id="ed-new-label" placeholder="e.g. IPTOR" /></div>
+            <button id="ed-add-stream">Add stream</button>
+          </div>
         </div>
       </section>
+    </div>
     </div>
     <div class="dialog-backdrop" id="ed-src-dlg">
       <div class="dialog" style="width:480px;max-height:80vh;overflow:auto">
         <h2>Add missing channels from source</h2>
-        <p class="page-sub">Only adds channels not already in your managed list. Stream backups must be added manually on each channel.</p>
+        <p class="page-sub" id="ed-src-sub">Only adds channels not already in your managed list. Stream backups must be added manually on each channel.</p>
         <div class="field"><label>Source</label><select id="ed-src-source"></select></div>
         <div class="field"><label>Group</label><select id="ed-src-group"></select></div>
         <div class="field"><label>Filter channels</label><input id="ed-src-filter" placeholder="name contains…" /></div>
         <div id="ed-src-list" class="editor-list" style="max-height:240px"></div>
         <div class="dialog-actions">
           <button id="ed-src-close">Cancel</button>
+          <button id="ed-src-create-empty" hidden>Create empty playlist</button>
           <button class="accent" id="ed-src-add">Add selected</button>
+        </div>
+      </div>
+    </div>
+    <div class="dialog-backdrop" id="ed-del-dlg">
+      <div class="dialog">
+        <h2>Delete channel?</h2>
+        <p class="page-sub" id="ed-del-msg">Remove this channel from the managed playlist?</p>
+        <div class="dialog-actions">
+          <button type="button" id="ed-del-no">Cancel</button>
+          <button type="button" class="accent" id="ed-del-yes">Delete</button>
+        </div>
+      </div>
+    </div>
+    <div class="dialog-backdrop" id="ed-clear-dlg">
+      <div class="dialog">
+        <h2>Clear managed playlist?</h2>
+        <p class="page-sub">Remove all channels from the managed playlist?</p>
+        <div class="dialog-actions">
+          <button type="button" id="ed-clear-no">Cancel</button>
+          <button type="button" class="accent" id="ed-clear-yes">Clear</button>
         </div>
       </div>
     </div>
@@ -147,6 +202,16 @@ export function editorHtml(): string {
         </div>
       </div>
     </div>
+    <div class="dialog-backdrop" id="ed-info-dlg">
+      <div class="dialog" style="width:420px">
+        <h2>Stream info</h2>
+        <div class="field"><label>Origin name</label><p id="ed-info-name" class="page-sub"></p></div>
+        <div class="field"><label>Origin tvg-id</label><p id="ed-info-tvg" class="page-sub"></p></div>
+        <div class="dialog-actions">
+          <button class="accent" id="ed-info-close">Close</button>
+        </div>
+      </div>
+    </div>
     <div class="group-rename-pop" id="ed-rename" hidden>
       <div class="group-rename-title">Rename group</div>
       <input id="ed-rename-box" />
@@ -156,6 +221,36 @@ export function editorHtml(): string {
 }
 
 export async function mountEditor(page: HTMLElement, toast: (s: string) => void): Promise<void> {
+  const split = page.querySelector<HTMLElement>("#ed-split");
+  const splitGroups = page.querySelector<HTMLElement>("#ed-split-groups");
+  const splitChans = page.querySelector<HTMLElement>("#ed-split-chans");
+  if (split && splitGroups && splitChans) {
+    bindThreeColSplit(split, splitGroups, splitChans, "studio-ed");
+  }
+
+  applyPlayGate(page);
+
+  const playerSel = page.querySelector<HTMLSelectElement>("#ed-player");
+  if (playerSel) {
+    void invoke<Record<string, unknown>>("load_settings").then((st) => {
+      applyPlayerEngineValue(
+        page.querySelector<HTMLSelectElement>("#ed-player"),
+        st.DefaultPlayer ?? 2,
+      );
+    });
+    playerSel.addEventListener("change", async () => {
+      const sel = page.querySelector<HTMLSelectElement>("#ed-player");
+      if (!sel) return;
+      try {
+        const st = await invoke<Record<string, unknown>>("load_settings");
+        st.DefaultPlayer = parseInt(sel.value, 10) || 0;
+        await invoke("save_settings", { settings: st });
+      } catch (e) {
+        toast(String(e));
+      }
+    });
+  }
+
   const shift = page.querySelector<HTMLSelectElement>("#ed-shift")!;
   for (const z of SHIFTS) {
     const o = document.createElement("option");
@@ -171,6 +266,58 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
   let draft = false;
   let chanVirt: VirtualList<Managed> | null = null;
   let groupVirt: VirtualList<{ title: string; count: number }> | null = null;
+  let lastEdChans: Managed[] = [];
+  type EdProbe = { state: "run" } | { state: "done"; text: string; grade: string; until: number };
+  const edProbe = new Map<string, EdProbe>();
+  let edProbeTimer = 0;
+  const AUDIT_SHOW_MS = 20_000;
+
+  const auditLine = (r: ChannelAudit): { text: string; grade: string } => {
+    const grade = (r.grade || (r.ok ? "C" : "F")).toUpperCase();
+    if (!r.ok && r.error) return { text: r.error, grade };
+    const parts: string[] = [];
+    if (r.width && r.height) parts.push(`${r.width}\u00d7${r.height}`);
+    if (r.aspectRatio) parts.push(r.aspectRatio);
+    if (r.fps && r.fps > 0) parts.push(`${Math.round(r.fps)} fps`);
+    if (r.videoCodec) parts.push(r.videoCodec);
+    if (r.audioCodec) parts.push(r.audioCodec);
+    if (r.latencyMs != null) parts.push(`${r.latencyMs} ms`);
+    return { text: parts.join(" \u00b7 ") || "OK", grade };
+  };
+
+  const urlCellHtml = (c: Managed, url: string): string => {
+    const p = edProbe.get(c.id);
+    if (p?.state === "run") {
+      return `<span class="ed-audit-url wait">Testing\u2026</span>`;
+    }
+    if (p?.state === "done" && p.until > Date.now()) {
+      return `<span class="ed-audit-url" data-g="${esc(p.grade)}" title="${esc(p.text)}">${esc(p.grade)} \u00b7 ${esc(p.text)}</span>`;
+    }
+    return `<span class="copy url" data-copy="${esc(url)}" title="${esc(url)}">${esc(truncateUrl(url, 64))}</span>`;
+  };
+
+  const refreshChanRows = () => {
+    if (chanVirt) chanVirt.setItems(lastEdChans);
+  };
+
+  const scheduleProbeClear = () => {
+    if (edProbeTimer) return;
+    edProbeTimer = window.setInterval(() => {
+      const now = Date.now();
+      let changed = false;
+      for (const [id, p] of [...edProbe]) {
+        if (p.state === "done" && p.until <= now) {
+          edProbe.delete(id);
+          changed = true;
+        }
+      }
+      if (changed) refreshChanRows();
+      if (![...edProbe.values()].some((p) => p.state === "done")) {
+        window.clearInterval(edProbeTimer);
+        edProbeTimer = 0;
+      }
+    }, 250);
+  };
 
   const filtered = () => allManaged.filter((c) => matchesEditorSearch(c, filter));
 
@@ -180,12 +327,14 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
   const closeRename = () => {
     renamePop.hidden = true;
   };
-  const openRename = (title: string, ev: MouseEvent) => {
+  const openRename = (title: string, anchor: HTMLElement) => {
     renameOld = title;
     renameBox.value = title;
     renamePop.hidden = false;
-    const x = Math.max(8, Math.min(ev.clientX - page.getBoundingClientRect().left, page.clientWidth - 240));
-    const y = Math.max(8, Math.min(ev.clientY - page.getBoundingClientRect().top, page.clientHeight - 120));
+    const pageRect = page.getBoundingClientRect();
+    const r = anchor.getBoundingClientRect();
+    const x = Math.max(8, Math.min(r.left - pageRect.left, page.clientWidth - 240));
+    const y = Math.max(8, Math.min(r.bottom - pageRect.top + 4, page.clientHeight - 120));
     renamePop.style.left = `${x}px`;
     renamePop.style.top = `${y}px`;
     window.setTimeout(() => {
@@ -231,8 +380,40 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     if (!renamePop.contains(ev.target as Node)) closeRename();
   });
 
+  const playlistOpen = () =>
+    allManaged.length > 0 || sessionStorage.getItem(STARTED_KEY) === "1";
+
+  const applyEmptyState = () => {
+    const open = playlistOpen();
+    const blank = page.querySelector<HTMLElement>("#ed-blank");
+    const work = page.querySelector<HTMLElement>("#ed-workspace");
+    if (blank) blank.hidden = open;
+    if (work) work.hidden = !open;
+  };
+
+  const refreshBlankCopy = async () => {
+    const btn = page.querySelector<HTMLButtonElement>("#ed-empty-create");
+    const msg = page.querySelector("#ed-blank-msg");
+    try {
+      const sources = await api.listSources();
+      if (btn) {
+        btn.title = sources.length
+          ? "Create a curated list from loaded sources"
+          : "Create an empty curated playlist";
+      }
+      if (msg) {
+        msg.textContent = sources.length
+          ? "Load a file, or create a curated playlist from your sources"
+          : "Load a file, or create an empty curated playlist";
+      }
+    } catch {
+      /* keep defaults */
+    }
+  };
+
   const reload = async () => {
     allManaged = await invoke<Managed[]>("list_managed", { group: null });
+    applyEmptyState();
     const hits = filtered();
     const counts = new Map<string, number>();
     for (const c of hits) {
@@ -272,9 +453,12 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
         });
         b.addEventListener("contextmenu", (ev) => {
           ev.preventDefault();
-          openRename(g.title, ev);
+          openRename(g.title, b);
         });
-        b.addEventListener("dblclick", () => b.dispatchEvent(new Event("contextmenu")));
+        b.addEventListener("dblclick", (ev) => {
+          ev.preventDefault();
+          openRename(g.title, b);
+        });
         return b;
       },
     });
@@ -294,42 +478,119 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       list.innerHTML = "";
       return;
     }
-    const chans = group
-      ? filtered().filter((c) => sameGroup(c.groupTitle, group))
-      : [];
+    const raw = await invoke<Managed[]>("list_managed", { group, hydrate: true });
+    const chans = raw.filter((c) => matchesEditorSearch(c, filter));
+    lastEdChans = chans;
     if (!page.querySelector("#ed-channels")) return;
     if (!chanVirt) {
       chanVirt = bindVirtualList({
         scroller: list,
-        rowHeight: 52,
+        rowHeight: 48,
         renderRow: (c) => {
-          const row = document.createElement("button");
-          row.className = "chan-pick" + (selected?.id === c.id ? " active" : "");
+          const url = primaryUrl(c);
+          const row = document.createElement("div");
+          row.className = "chan-row no-add" + (selected?.id === c.id ? " active" : "");
+          row.dataset.id = c.id;
           row.innerHTML = `
-        <span class="logo-slot">
-          ${c.tvgLogo ? `<img src="${esc(c.tvgLogo)}" alt="" />` : `<span class="logo-broken">&#xE7BA;</span>`}
-        </span>
-        <span>
-          <span class="chan-name">${esc(c.name)}</span>
-          <span class="chan-sub">${esc(c.tvgId ?? "")}${
-            c.hasEpgMatch
-              ? ` <span class="tvg-check" title="tvg-id matches EPG catalog">&#xE73E;</span>`
-              : ""
-          }</span>
-        </span>`;
+        <button class="probe" type="button" data-id="${esc(c.id)}" data-url="${esc(url)}" title="Audit this stream">&#xE9E9;</button>
+        <button class="play" type="button" data-id="${esc(c.id)}" data-url="${esc(url)}" title="${canPlay() ? "Play stream" : "Install mpv or VLC, or set a player path in Settings"}" ${canPlay() ? "" : "disabled"}>&#xE768;</button>
+        <div class="chan-main">
+          <span class="logo-slot">
+            ${c.tvgLogo ? `<img alt="" />` : `<span class="logo-broken">&#xE7BA;</span>`}
+          </span>
+          <div class="chan-meta">
+            <div class="chan-name" title="${esc(c.name)}">${esc(c.name)}</div>
+            <div class="chan-sub">${esc(c.tvgId ?? "")}${
+              c.hasEpgMatch
+                ? ` <span class="tvg-check" title="tvg-id matches EPG catalog">&#xE73E;</span>`
+                : ""
+            }</div>
+          </div>
+        </div>
+        ${urlCellHtml(c, url)}`;
           const img = row.querySelector("img");
-          img?.addEventListener("error", () => {
+          const fail = () => {
             const slot = row.querySelector(".logo-slot");
             if (!slot) return;
             slot.innerHTML = `<span class="logo-broken">&#xE7BA;</span>`;
-          });
-          row.addEventListener("click", () => void select(c.id));
+          };
+          if (img && c.tvgLogo) bindPlayerLogo(img, c.tvgLogo, fail);
           return row;
         },
       });
     }
     chanVirt.setItems(chans);
+    applyPlayGate(page);
   };
+
+  const edChannels = page.querySelector<HTMLElement>(".channels");
+  if (edChannels) {
+    edChannels.classList.toggle("hide-url", localStorage.getItem("studio-hide-url-col") === "1");
+    edChannels.addEventListener("click", (ev) => {
+      const t = ev.target as HTMLElement;
+      if (!t.classList.contains("col-url") && !t.classList.contains("col-url-show")) return;
+      const hide = localStorage.getItem("studio-hide-url-col") !== "1";
+      localStorage.setItem("studio-hide-url-col", hide ? "1" : "0");
+      edChannels.classList.toggle("hide-url", hide);
+    });
+  }
+
+  page.querySelector("#ed-channels")?.addEventListener("click", async (ev) => {
+    const t = ev.target as HTMLElement;
+    const row = t.closest(".chan-row") as HTMLElement | null;
+    if (!row?.dataset.id) return;
+    const id = row.dataset.id;
+    if (t.classList.contains("play")) {
+      if (!canPlay()) {
+        toast("Install mpv or VLC, or set a player path in Settings");
+        return;
+      }
+      const url = t.dataset.url ?? "";
+      if (!url) {
+        toast("No stream URL on this channel");
+        return;
+      }
+      try {
+        toast("Checking stream…");
+        await api.playUrl(url);
+        toast("Playing");
+      } catch (e) {
+        toast(String(e));
+      }
+      return;
+    }
+    if (t.classList.contains("probe")) {
+      const url = t.dataset.url ?? "";
+      if (!url) {
+        toast("No stream URL on this channel");
+        return;
+      }
+      if (edProbe.get(id)?.state === "run") return;
+      edProbe.set(id, { state: "run" });
+      refreshChanRows();
+      try {
+        const result = await api.auditSourceChannel(url);
+        const line = auditLine(result);
+        edProbe.set(id, { state: "done", text: line.text, grade: line.grade, until: Date.now() + AUDIT_SHOW_MS });
+      } catch (e) {
+        edProbe.set(id, {
+          state: "done",
+          text: String(e),
+          grade: "F",
+          until: Date.now() + AUDIT_SHOW_MS,
+        });
+      }
+      refreshChanRows();
+      scheduleProbeClear();
+      return;
+    }
+    if (t.classList.contains("copy") && t.dataset.copy) {
+      await navigator.clipboard.writeText(t.dataset.copy);
+      toast("Copied.");
+      return;
+    }
+    void select(id);
+  });
 
   const select = async (id: string) => {
     selected = (await invoke<Managed | null>("get_managed", { id })) ?? null;
@@ -362,13 +623,19 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
   };
 
   const updateMatch = async () => {
-    const tvg = (page.querySelector("#ed-tvg") as HTMLInputElement).value.trim();
-    const check = page.querySelector<HTMLElement>("#ed-tvg-check")!;
-    const input = page.querySelector<HTMLInputElement>("#ed-tvg")!;
+    const tvgEl = page.querySelector<HTMLInputElement>("#ed-tvg");
+    if (!tvgEl || !page.querySelector("#ed-fields")) return;
+    const tvg = tvgEl.value.trim();
     const known = tvg ? await invoke<boolean>("is_known_tvg", { tvgId: tvg }) : false;
+    if (!page.querySelector("#ed-fields")) return;
+    const check = page.querySelector<HTMLElement>("#ed-tvg-check");
+    const input = page.querySelector<HTMLInputElement>("#ed-tvg");
+    const now = page.querySelector<HTMLElement>("#ed-now");
+    const title = page.querySelector<HTMLElement>("#ed-now-title");
+    const times = page.querySelector<HTMLElement>("#ed-now-times");
+    if (!check || !input || !now || !title || !times) return;
     check.hidden = !known;
     input.classList.toggle("tvg-ok", known);
-    const now = page.querySelector<HTMLElement>("#ed-now")!;
     if (!known) {
       now.hidden = true;
       return;
@@ -378,17 +645,21 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       tvgId: tvg,
       shiftHours: hours,
     });
+    if (!page.querySelector("#ed-fields")) return;
+    const titleEl = page.querySelector<HTMLElement>("#ed-now-title");
+    const timesEl = page.querySelector<HTMLElement>("#ed-now-times");
+    const nowEl = page.querySelector<HTMLElement>("#ed-now");
+    if (!titleEl || !timesEl || !nowEl) return;
     const shiftNote = Math.abs(hours) > 0.01 ? `  ·  tvg-shift ${hours > 0 ? "+" : ""}${hours}` : "";
+    nowEl.hidden = false;
     if (!np) {
-      now.hidden = false;
-      page.querySelector("#ed-now-title")!.textContent = "No programme at this time";
-      page.querySelector("#ed-now-times")!.textContent = shiftNote
+      titleEl.textContent = "No programme at this time";
+      timesEl.textContent = shiftNote
         ? `Nothing scheduled at the shifted guide time.${shiftNote}`
         : "Guide has this tvg-id, but nothing is scheduled at the current (shifted) time.";
     } else {
-      now.hidden = false;
-      page.querySelector("#ed-now-title")!.textContent = np.title;
-      page.querySelector("#ed-now-times")!.textContent = `${np.startLocal}–${np.stopLocal}${shiftNote}`;
+      titleEl.textContent = np.title;
+      timesEl.textContent = `${np.startLocal}–${np.stopLocal}${shiftNote}`;
     }
   };
 
@@ -400,10 +671,10 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       const row = document.createElement("div");
       row.className = "stream-row";
       row.innerHTML = `
-        <button data-act="play" data-id="${v.id}">Play</button>
+        <button data-act="play" data-id="${v.id}" ${canPlay() ? "" : "disabled"} title="${canPlay() ? "Play" : "Install mpv or VLC, or set a player path in Settings"}">Play</button>
         <div>
           <div>${esc(v.label || (v.visibility === "visible" ? "visible" : "backup"))}</div>
-          <div class="chan-sub">${esc(v.url)}</div>
+          <div class="chan-sub stream-url" title="${esc(v.url)}">${esc(truncateUrl(v.url))}</div>
         </div>
         <button data-act="info" data-id="${v.id}">Info</button>
         <button data-act="up" data-id="${v.id}">↑</button>
@@ -412,6 +683,7 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       `;
       box.appendChild(row);
     }
+    applyPlayGate(page);
   };
 
   const paintLogo = () => {
@@ -423,11 +695,12 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       slot.innerHTML = `<span class="broken">broken logo</span>`;
       return;
     }
-    slot.innerHTML = `<img src="${esc(url)}" alt="" />`;
+    slot.innerHTML = `<img alt="" />`;
     const img = slot.querySelector("img");
-    img?.addEventListener("error", () => {
+    const fail = () => {
       slot.innerHTML = `<span class="broken">broken logo</span>`;
-    });
+    };
+    if (img) bindPlayerLogo(img, url, fail);
   };
 
   const gather = (): Managed | null => {
@@ -454,23 +727,33 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       toast("Channel saved");
       selected = await invoke("get_managed", { id: ch.id });
       group = selected?.groupTitle ?? group;
-      const status = page.querySelector("#ed-status")!;
-      status.textContent = "";
+      const status = page.querySelector("#ed-status");
+      if (status) status.textContent = "";
       await reload();
     } catch (e) {
       toast(String(e));
     }
   });
 
+  const delDlg = page.querySelector("#ed-del-dlg")!;
   page.querySelector("#ed-delete")!.addEventListener("click", async () => {
     if (!selected) return;
     if (draft) {
       draft = false;
       selected = null;
-      page.querySelector("#ed-status")!.textContent = "Draft discarded.";
+      const st = page.querySelector("#ed-status");
+      if (st) st.textContent = "Draft discarded.";
       await paintForm();
       return;
     }
+    const msg = page.querySelector("#ed-del-msg");
+    if (msg) msg.textContent = `Remove “${selected.name}” from the managed playlist?`;
+    delDlg.classList.add("open");
+  });
+  page.querySelector("#ed-del-no")!.addEventListener("click", () => delDlg.classList.remove("open"));
+  page.querySelector("#ed-del-yes")!.addEventListener("click", async () => {
+    delDlg.classList.remove("open");
+    if (!selected) return;
     try {
       await invoke("delete_managed", { id: selected.id });
       selected = null;
@@ -488,7 +771,7 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     selected = null;
     await reload();
   };
-  page.querySelector("#ed-load")!.addEventListener("click", async () => {
+  const onLoadClick = async () => {
     try {
       const n = await api.managedCount();
       if (n <= 0) {
@@ -504,6 +787,30 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       dlg.classList.add("open");
     } catch (e) {
       toast(String(e));
+    }
+  };
+  page.querySelector("#ed-load")!.addEventListener("click", () => void onLoadClick());
+  page.querySelector("#ed-empty-load")!.addEventListener("click", () => void onLoadClick());
+  page.querySelector("#ed-empty-create")!.addEventListener("click", async () => {
+    try {
+      const sources = await api.listSources();
+      if (sources.length === 0) {
+        sessionStorage.setItem(STARTED_KEY, "1");
+        toast("Empty curated playlist. Add channels from sources, or load a file.");
+        await reload();
+        return;
+      }
+      await openAddFrom(true);
+    } catch (e) {
+      toast(String(e));
+    }
+  });
+  page.querySelector("#ed-info-close")?.addEventListener("click", () => {
+    page.querySelector("#ed-info-dlg")?.classList.remove("open");
+  });
+  page.querySelector("#ed-info-dlg")?.addEventListener("click", (ev) => {
+    if (ev.target === ev.currentTarget) {
+      page.querySelector("#ed-info-dlg")?.classList.remove("open");
     }
   });
   page.querySelector("#ed-load-cancel")!.addEventListener("click", () => {
@@ -525,14 +832,19 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       toast(String(e));
     }
   });
-  page.querySelector("#ed-clear")!.addEventListener("click", async () => {
-    if (!window.confirm("Remove all channels from the managed playlist?")) return;
+  const clearDlg = page.querySelector("#ed-clear-dlg")!;
+  page.querySelector("#ed-clear")!.addEventListener("click", () => clearDlg.classList.add("open"));
+  page.querySelector("#ed-clear-no")!.addEventListener("click", () => clearDlg.classList.remove("open"));
+  page.querySelector("#ed-clear-yes")!.addEventListener("click", async () => {
+    clearDlg.classList.remove("open");
     try {
       await invoke("clear_managed");
       group = "";
       selected = null;
       toast("Cleared.");
+      sessionStorage.removeItem(STARTED_KEY);
       await reload();
+      await refreshBlankCopy();
     } catch (e) {
       toast(String(e));
     }
@@ -620,11 +932,20 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     const act = btn.dataset.act;
     try {
       if (act === "play") {
+        if (!canPlay()) {
+          toast("Install mpv or VLC, or set a player path in Settings");
+          return;
+        }
         const v = selected.variants.find((x) => x.id === id);
         if (v) await api.playUrl(v.url);
       } else if (act === "info") {
         const v = selected.variants.find((x) => x.id === id);
-        toast(`${v?.originName ?? "—"} / ${v?.originTvgId ?? "—"}`);
+        const dlg = page.querySelector("#ed-info-dlg");
+        const nameEl = page.querySelector("#ed-info-name");
+        const tvgEl = page.querySelector("#ed-info-tvg");
+        if (nameEl) nameEl.textContent = v?.originName?.trim() || "—";
+        if (tvgEl) tvgEl.textContent = v?.originTvgId?.trim() || "—";
+        dlg?.classList.add("open");
       } else if (act === "up") {
         await invoke("move_variant", { managedId: selected.id, variantId: id, delta: -1 });
         selected = await invoke("get_managed", { id: selected.id });
@@ -697,27 +1018,48 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     }
   }
 
-  page.querySelector("#ed-add-from")!.addEventListener("click", async () => {
-    try {
-      const sources = await api.listSources();
-      if (sources.length === 0) {
-        toast("Load a source in Add Sources first");
-        return;
-      }
-      srcSource.innerHTML = "";
-      for (const s of sources) {
-        const o = document.createElement("option");
-        o.value = s.id;
-        o.textContent = `${s.name} (${s.channelCount})`;
-        srcSource.appendChild(o);
-      }
-      srcSource.selectedIndex = 0;
-      srcFilter.value = "";
-      srcDlg.classList.add("open");
-      await fillSourceGroups();
-    } catch (e) {
-      toast(String(e));
+  const openAddFrom = async (createFlow: boolean) => {
+    const sources = await api.listSources();
+    if (sources.length === 0) {
+      toast("Load a source in Add Sources first");
+      return false;
     }
+    srcSource.innerHTML = "";
+    for (const s of sources) {
+      const o = document.createElement("option");
+      o.value = s.id;
+      o.textContent = `${s.name} (${s.channelCount})`;
+      srcSource.appendChild(o);
+    }
+    srcSource.selectedIndex = 0;
+    srcFilter.value = "";
+    const emptyBtn = page.querySelector<HTMLButtonElement>("#ed-src-create-empty");
+    if (emptyBtn) emptyBtn.hidden = !createFlow;
+    const title = page.querySelector("#ed-src-dlg h2");
+    if (title) {
+      title.textContent = createFlow
+        ? "Create curated playlist from sources"
+        : "Add missing channels from source";
+    }
+    const sub = page.querySelector("#ed-src-sub");
+    if (sub) {
+      sub.textContent = createFlow
+        ? "Pick channels from a loaded source, or create an empty playlist. Stream backups must be added manually on each channel."
+        : "Only adds channels not already in your managed list. Stream backups must be added manually on each channel.";
+    }
+    srcDlg.classList.add("open");
+    await fillSourceGroups();
+    return true;
+  };
+
+  page.querySelector("#ed-add-from")!.addEventListener("click", () => {
+    void openAddFrom(false).catch((e) => toast(String(e)));
+  });
+  page.querySelector("#ed-src-create-empty")?.addEventListener("click", async () => {
+    srcDlg.classList.remove("open");
+    sessionStorage.setItem(STARTED_KEY, "1");
+    toast("Empty curated playlist. Add channels from sources, or load a file.");
+    await reload();
   });
   page.querySelector("#ed-src-close")!.addEventListener("click", () => {
     srcDlg.classList.remove("open");
@@ -738,6 +1080,7 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
         sourceLabel: label,
       });
       srcDlg.classList.remove("open");
+      sessionStorage.setItem(STARTED_KEY, "1");
       toast(msg);
       await reload();
     } catch (e) {
@@ -779,6 +1122,7 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
   page.addEventListener("studio-search", (ev) => {
     filter = (ev as CustomEvent<string>).detail ?? "";
     void reload().catch((e) => toast(String(e)));
+    void refreshBlankCopy();
   });
 
   try {
@@ -791,6 +1135,26 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
   } catch (e) {
     toast(String(e));
   }
+  void invoke<string>("rebuild_now_playing")
+    .then(() => {
+      if (selected && page.querySelector("#ed-fields")) {
+        return updateMatch();
+      }
+    })
+    .catch(() => undefined);
+}
+
+function primaryUrl(c: Managed): string {
+  return (
+    c.variants.find((v) => v.visibility === "visible")?.url ?? c.variants[0]?.url ?? ""
+  );
+}
+
+function truncateUrl(url: string, max = 52): string {
+  const u = url.trim();
+  if (u.length <= max) return u;
+  const keep = Math.max(16, Math.floor((max - 3) / 2));
+  return `${u.slice(0, keep)}...${u.slice(-keep)}`;
 }
 
 function esc(s: string): string {

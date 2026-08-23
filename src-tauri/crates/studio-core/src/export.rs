@@ -1,6 +1,84 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use crate::models::ManagedChannel;
+use std::collections::{HashMap, HashSet};
+
+use crate::epg::tvg_lookup_ids;
+use crate::hdhr::xmltv_time;
+use crate::models::{EpgProgramme, ManagedChannel};
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// XMLTV for a curated playlist: `channel` / `programme@channel` use the playlist tvg-id.
+pub fn export_guide_xmltv(channels: &[ManagedChannel], programmes: &[EpgProgramme]) -> String {
+    let mut by_tvg: HashMap<String, Vec<&EpgProgramme>> = HashMap::new();
+    for p in programmes {
+        let key = p.tvg_id.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        by_tvg.entry(key).or_default().push(p);
+    }
+    let mut sb = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<tv generator-info-name=\"epg.monster studio\">\n");
+    for ch in channels {
+        let id = ch
+            .tvg_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        if id.is_empty() {
+            continue;
+        }
+        let name = if ch.name.trim().is_empty() {
+            id
+        } else {
+            ch.name.trim()
+        };
+        sb.push_str("  <channel id=\"");
+        sb.push_str(&xml_escape(id));
+        sb.push_str("\">\n    <display-name>");
+        sb.push_str(&xml_escape(name));
+        sb.push_str("</display-name>\n  </channel>\n");
+    }
+    for ch in channels {
+        let id = ch
+            .tvg_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        if id.is_empty() {
+            continue;
+        }
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        for alias in tvg_lookup_ids(id) {
+            let Some(list) = by_tvg.get(&alias.to_ascii_lowercase()) else {
+                continue;
+            };
+            for p in list {
+                if !seen.insert((p.start_utc.clone(), p.title.clone())) {
+                    continue;
+                }
+                sb.push_str("  <programme start=\"");
+                sb.push_str(&xmltv_time(&p.start_utc));
+                sb.push_str("\" stop=\"");
+                sb.push_str(&xmltv_time(&p.stop_utc));
+                sb.push_str("\" channel=\"");
+                sb.push_str(&xml_escape(id));
+                sb.push_str("\">\n    <title>");
+                sb.push_str(&xml_escape(&p.title));
+                sb.push_str("</title>\n  </programme>\n");
+            }
+        }
+    }
+    sb.push_str("</tv>\n");
+    sb
+}
 
 fn escape_attr(s: &str) -> String {
     s.replace('"', "'")
@@ -154,5 +232,22 @@ mod tests {
         assert!(s.contains("http://vis"));
         assert!(s.contains("http://bak"));
         assert!(s.contains("CNN (B)"));
+    }
+
+    #[test]
+    fn guide_xmltv_uses_playlist_tvg_id() {
+        let mut row = ch();
+        row.tvg_id = Some("KAUT-DT.us_locals1.us (src05)".into());
+        let programmes = [crate::models::EpgProgramme {
+            tvg_id: "KAUT-DT.us".into(),
+            title: "Local News".into(),
+            description: None,
+            start_utc: "2026-08-19T20:00:00Z".into(),
+            stop_utc: "2026-08-19T21:00:00Z".into(),
+        }];
+        let xml = export_guide_xmltv(&[row], &programmes);
+        assert!(xml.contains("channel=\"KAUT-DT.us_locals1.us (src05)\""));
+        assert!(xml.contains("Local News"));
+        assert!(xml.contains("channel id=\"KAUT-DT.us_locals1.us (src05)\""));
     }
 }

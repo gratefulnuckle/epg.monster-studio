@@ -305,12 +305,15 @@ fn probe_tune_url(report: &mut TunerProbeReport, kind: &str, url: &str, ua: &str
     {
         Ok(r) => {
             let code = r.status();
-            let _ = r.into_reader();
-            report.steps.push(pass(
-                kind,
-                "tune",
-                &format!("HTTP {code} · headers accepted"),
-            ));
+            let mut reader = r.into_reader();
+            let mut buf = [0u8; 188 * 4];
+            let n = std::io::Read::read(&mut reader, &mut buf).unwrap_or(0);
+            let detail = if n >= 188 && buf[..n].iter().any(|b| *b == 0x47) {
+                format!("HTTP {code} · MPEG-TS sync (0x47) in first {n} bytes")
+            } else {
+                format!("HTTP {code} · {n} bytes (no TS sync yet — remux may still be starting)")
+            };
+            report.steps.push(pass(kind, "tune", &detail));
         }
         Err(ureq::Error::Status(404, _)) => {
             report.steps.push(fail(kind, "tune", &format!("{url} → 404")));

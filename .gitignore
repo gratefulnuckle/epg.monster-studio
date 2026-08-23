@@ -1,7 +1,10 @@
-# Tauri / Node / Rust (for when implementation starts)
+# Tooling
 node_modules/
 dist/
+.vite/
 src-tauri/target/
+*.exe
+*.pdb
 *.db
 *.db-wal
 *.db-shm
@@ -11,8 +14,40 @@ Thumbs.db
 .env.*
 logs/
 _tooling-check/
+.studio-dev.pid
+.studio-install.json
+*.log
+*.m3u
+*.m3u8
+*.pfx
+*.p12
+*.pem
+*.dmp
+minidump-*.dmp
 
-# Bundled binaries (fetched at publish, same as C# repo)
+# Operator workspace — SQLite, logs, cache, locks (never push)
+/data/
+
+# Launchable copied next to the repo by studio.ps1 / studio.sh --install
+/epg-monster-studio
+/WebView2Loader.dll
+
+# Bundled / fetched binaries
 tools/ffmpeg/
 tools/mpv/
+tools/gstreamer/
 !tools/README.md
+src-tauri/windows/gstreamer-runtime.zip
+gstreamer/
+src-tauri/sidecars/*
+!src-tauri/sidecars/.gitkeep
+
+# V3 — G-houl Player / IPTV Player (local only until v3)
+ghoul/
+
+# Accidental cargo-target / Windows path copies inside the repo
+**/.rustc_info.json
+**/CACHEDIR.TAG
+**/.fingerprint/
+**/incremental/
+**/.cargo-artifact-lock

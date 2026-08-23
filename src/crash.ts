@@ -38,8 +38,7 @@ export function installCrashHooks(): void {
 export function startHeartbeat(): void {
   const tick = async () => {
     try {
-      const vis = await getCurrentWindow().isVisible();
-      await invoke("log_heartbeat", { visible: vis, tray: !vis });
+      await invoke("log_heartbeat");
     } catch {
       /* ignore */
     }
@@ -73,7 +72,12 @@ async function toastIfAuditRunning(): Promise<void> {
     if (snap.job?.state !== "running") return;
     const toast = document.getElementById("toast");
     if (!toast) return;
-    toast.textContent = "Still running in the tray (auto-audit continues). Use tray icon → Show / Close app.";
+    const msg = toast.querySelector("#toast-msg") ?? toast;
+    const title = toast.querySelector("#toast-title");
+    if (title) title.textContent = "epg.monster studio";
+    msg.textContent =
+      "Still running in the tray (auto-audit continues). Use tray icon → Show / Close app.";
+    toast.setAttribute("data-sev", "success");
     toast.classList.add("open");
     window.setTimeout(() => toast.classList.remove("open"), 3000);
   } catch {
@@ -81,7 +85,7 @@ async function toastIfAuditRunning(): Promise<void> {
   }
 }
 
-export async function showPendingCrash(root: HTMLElement): Promise<void> {
+export async function showPendingCrash(): Promise<void> {
   let report: CrashReport | null = null;
   try {
     report = await invoke<CrashReport | null>("consume_pending_crash");
@@ -89,15 +93,17 @@ export async function showPendingCrash(root: HTMLElement): Promise<void> {
     return;
   }
   if (!report) return;
-  presentCrash(root, report);
+  if ((report.kind || "").toLowerCase() === "unclean") return;
+  await presentCrash(report);
 }
 
-export function presentCrash(root: HTMLElement, report: CrashReport): void {
+export function presentCrash(report: CrashReport): Promise<void> {
   const kind = (report.kind || "unknown").toUpperCase();
   const host = document.createElement("div");
-  host.className = "dialog-backdrop open";
+  host.className = "dialog-backdrop open crash-overlay";
+  return new Promise((resolve) => {
   host.innerHTML = `
-    <div class="dialog" style="width:720px;max-height:85vh;overflow:auto">
+    <div class="dialog crash-dialog">
       <h2>Something went wrong</h2>
       <div class="chan-name">${esc(report.title)}</div>
       <p class="page-sub">${esc(kind)} · ${esc(report.when)}</p>
@@ -116,10 +122,13 @@ Log file: ${esc(report.logPath)}</p>
         <button class="accent" id="crash-close">Close</button>
       </div>
     </div>`;
-  root.appendChild(host);
+  document.body.appendChild(host);
   const status = host.querySelector<HTMLElement>("#crash-status")!;
   const sendBtn = host.querySelector<HTMLButtonElement>("#crash-send")!;
-  host.querySelector("#crash-close")!.addEventListener("click", () => host.remove());
+  host.querySelector("#crash-close")!.addEventListener("click", () => {
+    host.remove();
+    resolve();
+  });
   host.querySelector("#crash-logs")!.addEventListener("click", () => {
     void invoke("open_folder", { path: report.logPath ?? "" });
   });
@@ -127,7 +136,11 @@ Log file: ${esc(report.logPath)}</p>
     void invoke("open_folder", { path: report.reportPath ?? "" });
   });
   host.querySelector("#crash-copy")!.addEventListener("click", () => {
-    void navigator.clipboard.writeText(report.details ?? "");
+    const text = `${report.title}\n${report.summary}\n${report.details ?? ""}`
+      .replace(/(?:https?|rtmps?|rtsps?|udp|rtp):\/\/[^\s"'<>]+/gi, "[redacted]")
+      .replace(/epgm_[A-Za-z0-9_\-]+/gi, "epgm_***")
+      .replace(/(username|password|token)=[^&\s]+/gi, "$1=[redacted]");
+    void navigator.clipboard.writeText(text);
   });
   sendBtn.addEventListener("click", async () => {
     const notes = (host.querySelector("#crash-notes") as HTMLTextAreaElement).value;
@@ -158,6 +171,7 @@ Log file: ${esc(report.logPath)}</p>
       sendingIssue = false;
       sendBtn.disabled = false;
     }
+  });
   });
 }
 

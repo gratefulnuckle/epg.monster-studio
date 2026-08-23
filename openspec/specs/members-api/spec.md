@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Client for my.epg.monster members v1. C#: `MembersApiClient`, `CurationExporter`, `IssueReport`. Server may 404 until members v2; UI must handle that.
+Client for my.epg.monster members v1. Server may 404 until members v2; UI must handle that.
 
 ## Requirements
 
@@ -25,6 +25,9 @@ The system SHALL `GET {base}/api/member/v1/ping` (default base `https://epg.mons
 - AND last ping time is updated
 - AND the raw key is not written to the daily log
 
+### Requirement: Fetch curated XMLTV
+The system SHALL download the member XMLTV from the ping `feedUrl` / `feedUrlGz` (prefer gzip) using the same auth headers as ping. The access key MUST NOT be interpolated into the URL (not `my.epg.monster/{key}.xml`). A missing key uses the ping empty-key copy; a missing feed URL tells the operator to upload `channels.json`.
+
 ### Requirement: Publish lineup
 The system SHALL build channels.json from every managed channel with a non-empty tvg-id (including unknown ids), PUT to `/api/member/v1/feed/channels`, refuse empty bodies, and honor ping caps.
 
@@ -37,7 +40,7 @@ The system SHALL build channels.json from every managed channel with a non-empty
 #### Scenario: Never send stream URLs
 - GIVEN managed channels with URLs
 - WHEN the document is built
-- THEN the JSON contains tvg-ids (and logo if C# includes it) and MUST NOT contain stream URLs
+- THEN the JSON contains tvg-ids (and logo if present) and MUST NOT contain stream URLs
 
 ### Requirement: Job poll
 The system SHALL poll `GET /api/member/v1/feed/jobs/latest` when a rebuild is queued until `buildStatus=ready`, and disable the upload button while in flight.

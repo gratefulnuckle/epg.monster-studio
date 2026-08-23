@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Find missing, invalid, broken, or player-rejected logos; fix them; optionally save a local PNG pack. WinUI: `LogoAuditPage`, `SaveLogosWindow`.
+Find missing, invalid, broken, or player-rejected logos; fix them; optionally save a local PNG pack.
 
 ## Requirements
 
@@ -12,7 +12,7 @@ The system SHALL scan managed logos and classify each issue as missing, invalid,
 #### Scenario: Player-style GET
 - GIVEN a logo URL
 - WHEN the scanner probes it
-- THEN it uses a player-like GET (VLC UA as in C# `LogoPlayerCompat`)
+- THEN it uses a player-like GET (VLC user-agent)
 - AND Wikimedia/SVG/WebP-as-unsupported cases are labeled player-reject, not generic broken
 
 ### Requirement: Issue list chrome
@@ -24,7 +24,7 @@ The system SHALL show each issue row with a 32×32 thumbnail (or red issue icon)
 - THEN the NEWS header shows the issue count in `#FF6D00`
 
 ### Requirement: Clear logo
-The system SHALL provide **Clear logo**, which clears `tvg-logo` without rebuilding the finder list incorrectly (C# mid-audit fix).
+The system SHALL provide **Clear logo**, which clears `tvg-logo` without rebuilding the finder list incorrectly.
 
 #### Scenario: Clear
 - GIVEN a selected channel with a logo

@@ -2,9 +2,42 @@
 
 ## Purpose
 
-Curate managed channels: metadata, logos, tvg-id matching, now-playing, visible stream plus hidden backups. WinUI: `PlaylistEditorPage` — this is the P0 1:1 surface.
+Curate managed channels: metadata, logos, tvg-id matching, now-playing, visible stream plus hidden backups.
 
 ## Requirements
+
+### Requirement: Toolbar count and bulk actions
+The Playlist Editor action row SHALL keep Load / Add channels / Export on the left, the channel-count text next, then refresh and remove-all (trash) icons on the far right — the same glyphs as Add Sources.
+
+#### Scenario: Count sits left of icons
+- GIVEN a managed playlist is loaded
+- WHEN Playlist Editor is shown
+- THEN the `N channels` text is immediately left of the refresh and trash icons
+- AND those icons are on the far right of the action row
+
+### Requirement: Video Player selector
+The Playlist Editor SHALL show the same **Video Player** combo as Add Sources (`mpv` / `VLC`), bound to `DefaultPlayer` (default mpv). Changing it updates Settings so Play on a variant uses that engine.
+
+#### Scenario: Change player on Playlist Editor
+- GIVEN Playlist Editor is shown
+- WHEN the operator picks mpv in Video Player
+- THEN `DefaultPlayer` is saved
+- AND Add Sources and Settings show mpv
+
+### Requirement: Resizable columns
+The Playlist Editor SHALL lay out Groups, Channels, and Edit channel as three columns whose widths do not follow row content (long group or channel names wrap/ellipsis). The operator SHALL be able to drag the dividers to resize Groups and Channels the same way as Add Sources, with widths remembered for the session (local storage). The Edit channel pane SHALL keep a stable width when the selected group (category) changes; extra form content (now playing, suggestions, backups) scrolls inside that pane.
+
+#### Scenario: Category change does not resize the editor
+- GIVEN a channel is open in Edit channel
+- WHEN the operator selects a different group
+- THEN the three column widths stay as set
+- AND the Edit channel pane does not grow or shrink with the new group's names
+
+#### Scenario: Drag Groups divider
+- GIVEN Playlist Editor is shown
+- WHEN the operator drags the divider between Groups and Channels
+- THEN Groups width follows the pointer (clamped)
+- AND the width is restored on the next visit to Playlist Editor
 
 ### Requirement: Channel list row
 The system SHALL render each managed channel as a two-line row: 40×40 logo (or red broken glyph), name `#EEEEF0`, tvg-id `#AAAAAB`, and a green check (`#32CD32`) when `IsKnownTvgId(tvg-id)` is true. Tooltip on the check: `tvg-id matches EPG catalog`.
@@ -84,7 +117,7 @@ The system SHALL list variants with per-row **Play**, title + URL, **Info** (ori
 - GIVEN two variants
 - WHEN the operator moves a backup to the top
 - THEN that URL becomes the visible exported variant
-- AND a swap undo entry is written if C# does so for that action
+- AND a swap undo entry is written for that action
 
 #### Scenario: Info dialog
 - GIVEN a variant with origin metadata
@@ -106,6 +139,15 @@ The system SHALL rename a group via right-click or double-click in-place popup (
 - GIVEN a group in the list
 - WHEN the operator right-clicks and types a new name + Enter
 - THEN all channels in that group get the new `group_title`
+
+### Requirement: Empty state
+When no curated channels are loaded, Playlist Editor SHALL match Add Sources layout: page title, page text, **Video Player**, then a blank empty panel with **Load curated playlist** and **Create curated playlist**. Create uses loaded sources (picker) when any exist, or an empty list from scratch when none do. After a playlist exists, the same header stays and the action buttons (Load / Add from sources / Export / Refresh / Clear) follow Video Player.
+
+#### Scenario: No curated list
+- GIVEN Playlist Editor with zero managed channels
+- WHEN the page opens
+- THEN the three-column workspace is hidden
+- AND Load curated playlist and Create curated playlist are shown
 
 ### Requirement: Add channels from sources
 The system SHALL offer **Add channels from sources…** filtered by the search box (name / tvg-id).

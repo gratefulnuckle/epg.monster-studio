@@ -1,6 +1,6 @@
 [package]
 name = "studio-core"
-version = "2.0.0"
+version = "2.0.2"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Domain, parser, and SQLite store for epg.monster studio"
@@ -9,7 +9,6 @@ description = "Domain, parser, and SQLite store for epg.monster studio"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_repr = "0.1"
 regex = "1"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"

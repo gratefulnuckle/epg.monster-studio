@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { bindVirtualList, type VirtualList } from "./virtual";
+import { bindPlayerLogo } from "./logo-src";
+import { bindThreeColSplit } from "./split";
 
 export type LogoIssue = {
   managedChannelId: string;
@@ -33,20 +36,29 @@ const LABEL: Record<string, string> = {
 
 export function logoHtml(): string {
   return `
-    <div class="editor-toolbar">
-      <span class="editor-title">Logo Audit</span>
+    <h1 class="page-title">Logo Audit</h1>
+    <p class="page-sub">Scan uses a player-style GET (VLC UA) — the same fetch TiviMate, Plex, and tuners do. A logo that only opens in a browser is a fail.</p>
+    <div class="editor-workspace">
+    <div class="tabs-row">
       <button class="accent" id="lg-scan" title="Re-probe all logos (missing / invalid / won't load)">Scan logos</button>
-      <button id="lg-save" title="Download managed logos one at a time into group\\tvg-id.png">Save Logos</button>
+      <button id="lg-save" title="Download managed logos into group\\tvg-id.png. Existing files are skipped unless the download is a different size.">Save Logos</button>
       <button id="lg-batch" title="Pick several issue channels and set the same logo URL on all of them">Batch set logos</button>
       <label class="check"><input type="checkbox" id="lg-issues" checked /> Issues only</label>
       <span class="page-sub" id="lg-summary"></span>
     </div>
-    <p class="page-sub">Scan uses a player-style GET (VLC UA) — the same fetch TiviMate, Plex, and tuners do. A logo that only opens in a browser is a fail.</p>
-    <div class="editor-grid">
-      <section class="tile editor-pane"><h2>Groups</h2><div id="lg-groups" class="editor-list"></div></section>
-      <section class="tile editor-pane"><h2>Channels</h2><div id="lg-channels" class="editor-list"></div></section>
+    <div class="editor-grid editor-split" id="lg-split">
+      <section class="groups editor-pane">
+        <div class="groups-head">Groups</div>
+        <div id="lg-groups" class="groups-body"></div>
+      </section>
+      <div class="split-handle" id="lg-split-groups" title="Drag to resize groups"></div>
+      <section class="channels editor-pane">
+        <div class="groups-head">Channels</div>
+        <div id="lg-channels" class="editor-list"></div>
+      </section>
+      <div class="split-handle" id="lg-split-chans" title="Drag to resize channels"></div>
       <section class="tile editor-pane">
-        <h2>Logo finder</h2>
+        <div class="groups-head">Logo finder</div>
         <p class="page-sub" id="lg-empty">Select a channel.</p>
         <div id="lg-detail" hidden>
           <div id="lg-name" class="chan-name"></div>
@@ -78,8 +90,8 @@ export function logoHtml(): string {
     </div>
     <div class="dialog-backdrop" id="lg-save-dlg">
       <div class="dialog" style="width:720px;max-height:80vh;overflow:auto">
-        <h2>Save Logos</h2>
-        <p class="page-sub">Downloads each managed logo one at a time into group\\tvg-id.png. Already-saved files are skipped on Resume. Does not change Playlist Editor tvg-logo URLs.</p>
+        <h2 id="lg-save-title">Save Logos</h2>
+        <p class="page-sub" id="lg-save-copy">Downloads each managed logo one at a time into group\\tvg-id.png. Files already on disk are skipped unless the download is a different size. Does not change Playlist Editor tvg-logo URLs. Run Scan logos first so URLs are live.</p>
         <p class="page-sub" id="lg-save-tracker"></p>
         <div class="field"><label>Save folder</label><input id="lg-save-dir" /></div>
         <div class="dialog-actions" style="justify-content:flex-start;margin-top:8px">
@@ -94,10 +106,18 @@ export function logoHtml(): string {
         </div>
       </div>
     </div>
+    </div>
   `;
 }
 
 export async function mountLogo(page: HTMLElement, toast: (s: string) => void): Promise<void> {
+  const split = page.querySelector<HTMLElement>("#lg-split");
+  const splitGroups = page.querySelector<HTMLElement>("#lg-split-groups");
+  const splitChans = page.querySelector<HTMLElement>("#lg-split-chans");
+  if (split && splitGroups && splitChans) {
+    bindThreeColSplit(split, splitGroups, splitChans, "studio-lg");
+  }
+
   let rows: LogoIssue[] = [];
   let group = "";
   let selected: LogoIssue | null = null;
@@ -130,17 +150,34 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
 
   const reload = async (probe: boolean) => {
     setStatus(probe ? "Probing logos…" : "Loading channels…");
-    rows = await invoke<LogoIssue[]>("logo_scan", { probe });
+    const unlisten = probe
+      ? await listen<{ current: number; total: number; issues: number; name: string }>(
+          "logo-scan-progress",
+          (ev) => {
+            if (!page.querySelector("#lg-status")) return;
+            const p = ev.payload;
+            setStatus(`Probing ${p.current}/${p.total} — ${p.name} (${p.issues} issues)`);
+          },
+        )
+      : null;
+    try {
+      rows = await invoke<LogoIssue[]>("logo_scan", { probe });
+    } finally {
+      unlisten?.();
+    }
     if (!page.querySelector("#lg-groups")) return;
     summarize();
     paintGroups();
   };
 
   const paintGroups = () => {
-    const titles = [...new Set(rows.map((r) => r.groupTitle))];
+    const titles = [...new Set(rows.map((r) => r.groupTitle))].filter((t) =>
+      !issuesOnly || rows.some((r) => r.groupTitle === t && r.issue),
+    );
     const el = page.querySelector<HTMLElement>("#lg-groups");
     if (!el) return;
-    if (!group && titles[0]) group = titles[0];
+    if (!titles.includes(group)) group = titles[0] ?? "";
+    if (selected && !titles.includes(selected.groupTitle)) selected = null;
     groupVirt?.destroy();
     el.innerHTML = "";
     groupVirt = bindVirtualList({
@@ -150,7 +187,7 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
         const n = rows.filter((r) => r.groupTitle === t && r.issue).length;
         const b = document.createElement("button");
         b.className = "group-row" + (t === group ? " active" : "");
-        b.innerHTML = `${esc(t)}${n ? `<span class="issue-n"> ${n} issues</span>` : ""}`;
+        b.innerHTML = `${esc(t)}<span class="issue-n"> ${n} issues</span>`;
         b.addEventListener("click", () => {
           group = t;
           selected = null;
@@ -162,6 +199,7 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
     });
     groupVirt.setItems(titles);
     paintChannels();
+    paintDetail();
   };
 
   const paintChannels = () => {
@@ -178,7 +216,13 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
           b.innerHTML = `<span class="lg-thumb">${r.issue ? `<span class="broken">!</span>` : ""}</span>
         <span><span class="chan-name">${esc(r.channelName)}</span>
         <span class="chan-sub">${esc(r.tvgId ?? "")}</span></span>
-        ${r.issue ? `<span class="status-pill">${LABEL[r.issue] ?? r.issue}</span>` : ""}`;
+        ${
+            r.issue === "player-reject"
+              ? `<span class="issue-n">${esc(LABEL[r.issue])}</span>`
+              : r.issue
+                ? `<span class="status-pill">${esc(LABEL[r.issue] ?? r.issue)}</span>`
+                : ""
+          }`;
           b.addEventListener("click", () => {
             selected = r;
             paintChannels();
@@ -202,7 +246,9 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
     empty.hidden = true;
     body.hidden = false;
     page.querySelector("#lg-name")!.textContent = selected.channelName;
-    page.querySelector("#lg-reason")!.textContent = selected.reason || LABEL[selected.issue] || "";
+    const reason = page.querySelector("#lg-reason")!;
+    reason.className = "chan-sub";
+    reason.textContent = selected.reason || LABEL[selected.issue] || "";
     (page.querySelector("#lg-url") as HTMLInputElement).value = selected.currentLogo ?? "";
     const q = selected.channelName.trim() ? `${selected.channelName.trim()} logo` : "channel logo";
     page.querySelector("#lg-query")!.textContent = `Search query: ${q}`;
@@ -216,20 +262,29 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
       slot.innerHTML = `<span class="broken">broken logo</span>`;
       return;
     }
-    slot.innerHTML = `<img src="${esc(url)}" alt="" />`;
-    slot.querySelector("img")?.addEventListener("error", () => {
-      slot.innerHTML = `<span class="broken">broken logo</span>`;
-    });
+    slot.innerHTML = `<img alt="" />`;
+    const img = slot.querySelector("img");
+    if (img) {
+      bindPlayerLogo(img, url, () => {
+        slot.innerHTML = `<span class="broken">broken logo</span>`;
+      });
+    }
   };
 
   page.querySelector("#lg-issues")!.addEventListener("change", (ev) => {
     issuesOnly = (ev.target as HTMLInputElement).checked;
-    paintChannels();
+    paintGroups();
   });
   page.querySelector("#lg-scan")!.addEventListener("click", async () => {
-    toast("Scanning logos…");
-    await reload(true);
-    toast("Scan complete.");
+    const btn = page.querySelector<HTMLButtonElement>("#lg-scan")!;
+    btn.disabled = true;
+    toast("Scanning logos in the background…");
+    try {
+      await reload(true);
+      toast("Scan complete.");
+    } finally {
+      btn.disabled = false;
+    }
   });
   page.querySelector("#lg-url")!.addEventListener("change", paintPreview);
   page.querySelector("#lg-apply")!.addEventListener("click", async () => {
@@ -323,10 +378,11 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
     await invoke("logo_save_tracker", { root: saveRoot, items: saveItems });
   };
 
-  page.querySelector("#lg-save")!.addEventListener("click", async () => {
+  const openSaveDlg = async () => {
     await loadPlan();
     saveDlg.classList.add("open");
-  });
+  };
+  page.querySelector("#lg-save")!.addEventListener("click", () => void openSaveDlg());
   page.querySelector("#lg-save-default")!.addEventListener("click", async () => {
     const def = await invoke<string>("logo_default_dir");
     await loadPlan(def);
@@ -363,10 +419,10 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
     for (let i = 0; i < saveItems.length && saving; i++) {
       const it = saveItems[i];
       if (it.status === "saved" || it.status === "skip") continue;
-      if (!retryFailed && it.status === "failed") continue;
-      if (it.status !== "pending") continue;
+      if (it.status !== "pending" && it.status !== "cached") continue;
       saveItems[i] = await invoke<SaveItem>("logo_save_one", { item: it });
       await persistTracker();
+      if (!page.querySelector("#lg-save-list")) return;
       paintSave();
     }
     const paused = !saving;
@@ -376,18 +432,21 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
     await persistTracker();
     paintSave();
     const saved = saveItems.filter((x) => x.status === "saved").length;
-    const fail = saveItems.filter((x) => x.status === "failed" || x.status === "skip").length;
-    page.querySelector("#lg-save-status")!.textContent = paused
-      ? `Paused. ${saved} saved · ${fail} failed. Start / Resume to continue.`
-      : `Done. ${saved} saved · ${fail} failed → ${saveRoot}`;
-    if (!paused) toast("Save Logos finished.");
+    const skipped = saveItems.filter((x) => x.status === "skip" || x.status === "cached").length;
+    const fail = saveItems.filter((x) => x.status === "failed").length;
+    const st = page.querySelector("#lg-save-status");
+    if (st) st.textContent = paused
+      ? `Paused. ${saved} saved · ${skipped} cached/skipped · ${fail} failed. Start / Resume to continue.`
+      : `Done. ${saved} saved · ${skipped} cached/skipped · ${fail} failed → ${saveRoot}`;
+    if (!paused) toast("Logo download finished.");
   };
 
   page.querySelector("#lg-save-go")!.addEventListener("click", () => void runSave(false));
   page.querySelector("#lg-save-retry")!.addEventListener("click", () => void runSave(true));
 
   function paintSave() {
-    const el = page.querySelector("#lg-save-list")!;
+    const el = page.querySelector("#lg-save-list");
+    if (!el) return;
     el.innerHTML = "";
     saveItems.forEach((it, i) => {
       const row = document.createElement("div");
@@ -396,26 +455,28 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
       el.appendChild(row);
     });
     const saved = saveItems.filter((x) => x.status === "saved").length;
+    const cached = saveItems.filter((x) => x.status === "cached").length;
     const fail = saveItems.filter((x) => x.status === "failed" || x.status === "skip").length;
     const pending = saveItems.filter((x) => x.status === "pending" || x.status === "saving").length;
     const total = saveItems.length;
     page.querySelector("#lg-save-tracker")!.textContent =
       total === 0
         ? "No logos with a tvg-id to save."
-        : `Tracker: ${saved} saved · ${pending} remaining · ${fail} failed/skipped of ${total}`;
+        : `Tracker: ${saved} saved · ${cached} cached · ${pending} remaining · ${fail} failed/skipped of ${total}`;
     if (!saving) {
       page.querySelector("#lg-save-status")!.textContent =
         total === 0
           ? ""
-          : pending === 0
-            ? "Nothing left to download. Retry failed to try again."
-            : "Start / Resume skips files already on disk.";
+          : pending === 0 && cached === total
+            ? "All of these are already cached. Start / Resume re-checks size and skips matches."
+            : pending === 0
+              ? "Nothing left to download. Retry failed to try again."
+              : "Start / Resume skips cached files unless the download is a different size.";
     }
   }
 
   try {
     await reload(false);
-    void reload(true).catch((e) => toast(String(e)));
   } catch (e) {
     toast(String(e));
   }

@@ -17,6 +17,26 @@ pub fn configure_app_dir(dir: PathBuf) {
 }
 
 pub fn configure_from_current_exe() {
+    configure_from_launch_dir();
+}
+
+/// v2 is portable: data lives next to the launch folder, never OS AppData.
+/// `EPG_MONSTER_HOME` wins (set by `studio.ps1` / `studio.sh`). Else a source checkout
+/// (`package.json` + `src-tauri`). Else the executable's directory.
+pub fn configure_from_launch_dir() {
+    if let Ok(home) = env::var("EPG_MONSTER_HOME") {
+        let p = PathBuf::from(home.trim());
+        if !p.as_os_str().is_empty() {
+            configure_app_dir(p);
+            return;
+        }
+    }
+    if let Ok(cwd) = env::current_dir() {
+        if cwd.join("src-tauri").is_dir() && cwd.join("package.json").is_file() {
+            configure_app_dir(cwd);
+            return;
+        }
+    }
     if let Ok(img) = env::var("APPIMAGE") {
         if let Some(parent) = app_dir_from_appimage(Path::new(&img)) {
             configure_app_dir(parent);
@@ -91,45 +111,23 @@ pub fn local_data_root() -> PathBuf {
     })
 }
 
+/// OS user data folder. Unused in v2 (portable `{app}/data` only). Kept for v3.
 pub fn user_data_directory() -> PathBuf {
     local_data_root().join(PRODUCT_ID)
 }
 
-/// Portable install (writable app dir) → `{app}/data`. System install → OS user data folder.
-/// Does not search for or copy a C# `%LocalAppData%\epg.monster-studio` or `iptv-studio` tree.
+/// v2: always `{app}/data` next to the launch/install folder. Never AppData.
+/// Does not search for or copy `%LocalAppData%\epg.monster-studio` or `iptv-studio`.
 pub fn app_data_directory() -> PathBuf {
     let app_dir = APP_DIR.get().cloned().unwrap_or_else(exe_install_dir);
     app_data_directory_for(&app_dir)
 }
 
 pub fn app_data_directory_for(app_dir: &Path) -> PathBuf {
-    let path = if dir_is_user_writable(app_dir) {
-        app_dir.join("data")
-    } else {
-        user_data_directory()
-    };
+    let path = app_dir.join("data");
     let _ = fs::create_dir_all(&path);
     let _ = fs::create_dir_all(path.join("cache"));
     path
-}
-
-fn dir_is_user_writable(dir: &Path) -> bool {
-    if !dir.is_dir() {
-        return false;
-    }
-    let probe = dir.join(".studio-write-probe");
-    match fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&probe)
-    {
-        Ok(_) => {
-            let _ = fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
 }
 
 pub fn database_file_in(dir: &Path) -> PathBuf {
@@ -191,19 +189,21 @@ mod tests {
     }
 
     #[test]
-    fn missing_install_dir_uses_user_folder() {
-        let missing = PathBuf::from("/this/does/not/exist/studio-app-dir");
+    fn missing_install_dir_still_uses_sidecar_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("nope").join("app");
         let data = app_data_directory_for(&missing);
-        assert!(data.ends_with(PRODUCT_ID));
+        assert_eq!(data, missing.join("data"));
+        assert!(data.is_dir());
     }
 
     #[test]
-    fn file_as_install_dir_uses_user_folder() {
+    fn file_as_install_dir_still_sidecar() {
         let tmp = tempfile::tempdir().unwrap();
         let file = tmp.path().join("not-a-dir");
         fs::write(&file, b"x").unwrap();
         let data = app_data_directory_for(&file);
-        assert!(data.ends_with(PRODUCT_ID));
+        assert_eq!(data, file.join("data"));
     }
 
     #[test]

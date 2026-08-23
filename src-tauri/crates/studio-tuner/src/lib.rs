@@ -38,7 +38,7 @@ mod tests {
     use crate::probe;
 
     #[test]
-    fn default_ports_match_csharp() {
+    fn default_ports_are_8080_to_8083() {
         assert_eq!(default_port("Plex"), 8080);
         assert_eq!(default_port("Jellyfin"), 8081);
         assert_eq!(default_port("Emby"), 8082);

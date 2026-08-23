@@ -72,23 +72,38 @@ const GRADE_COLOR: Record<string, string> = {
 
 export function auditHtml(): string {
   return `
-    <div class="editor-toolbar">
-      <span class="editor-title">Stream Audit</span>
-      <button class="accent" id="au-start">Start (all variants)</button>
-      <button id="au-visible">Visible only</button>
-      <button id="au-specific">Audit specific channels…</button>
-      <button id="au-today" title="Probe groups assigned to today in Settings (includes hidden backups)">Run today's groups</button>
-      <button id="au-pause" disabled>Pause</button>
-      <button id="au-resume" disabled>Resume</button>
-      <button id="au-cancel" disabled>Cancel</button>
-      <button id="au-undo">Undo last swap</button>
+    <h1 class="page-title">Stream Audit</h1>
+    <p class="page-sub">Serial stream probes (ffmpeg + ffprobe). Live streams that only show a known “channel is offline” card fail as an offline slate. The full result list is kept if you leave this page. Pause / resume survives a crash via auditprocess.db.</p>
+    <div class="editor-workspace">
+    <div class="tabs-row">
+      <div class="au-start-wrap" id="au-start-wrap">
+        <button class="accent" id="au-start" type="button">Start</button>
+        <div class="au-start-menu" id="au-start-menu" hidden>
+          <button type="button" data-start="all">Start All</button>
+          <button type="button" data-start="visible">Start Visible</button>
+          <button type="button" data-start="specific">Start Specific Channels</button>
+          <button type="button" data-start="today">Start Today's Groups</button>
+        </div>
+      </div>
+      <button class="au-icon" id="au-pause" disabled title="Pause">&#xE769;</button>
+      <button class="au-icon" id="au-resume" disabled title="Resume">&#xE768;</button>
+      <button class="au-icon" id="au-cancel" disabled title="Cancel">&#xE71A;</button>
+      <button class="au-icon" id="au-undo" title="Undo last swap">&#xE7A7;</button>
       <label class="check"><input type="checkbox" id="au-swap" checked /> Auto-swap on fail</label>
       <button id="au-results"># Results</button>
+      <button type="button" class="au-icon tab-del" id="au-clear" title="Clear current audit">&#xE74D;</button>
     </div>
-    <p class="page-sub">Serial stream probes (ffmpeg + ffprobe). Live streams that only show a known “channel is offline” card fail as an offline slate.
-    The full result list is kept if you leave this page. Pause / resume survives a crash via auditprocess.db.</p>
-    <p class="page-sub" id="au-clock"></p>
     <div id="au-feed" class="audit-feed"></div>
+    <div class="au-foot">
+      <div class="au-grades" id="au-grades">
+        <span class="au-grade" data-g="A">A: 0</span>
+        <span class="au-grade" data-g="B">B: 0</span>
+        <span class="au-grade" data-g="C">C: 0</span>
+        <span class="au-grade" data-g="D">D: 0</span>
+        <span class="au-grade" data-g="F">F: 0</span>
+      </div>
+      <p class="au-status" id="au-clock">Idle</p>
+    </div>
     <div class="dialog-backdrop" id="au-pick-dlg">
       <div class="dialog" style="width:560px;max-height:80vh;overflow:auto">
         <h2>Audit specific channels</h2>
@@ -103,6 +118,16 @@ export function auditHtml(): string {
         <div class="dialog-actions">
           <button id="au-pick-cancel">Cancel</button>
           <button class="accent" id="au-pick-go">Start</button>
+        </div>
+      </div>
+    </div>
+    <div class="dialog-backdrop" id="au-clear-dlg">
+      <div class="dialog">
+        <h2>Clear current audit?</h2>
+        <p class="page-sub">This removes the current Stream Audit job, live feed, and stored results.</p>
+        <div class="dialog-actions">
+          <button type="button" id="au-clear-no">Cancel</button>
+          <button type="button" class="accent" id="au-clear-yes">Clear</button>
         </div>
       </div>
     </div>
@@ -133,6 +158,7 @@ export function auditHtml(): string {
         </div>
       </div>
     </div>
+    </div>
   `;
 }
 
@@ -146,6 +172,7 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
   let pick: PickCh[] = [];
   let results: AuditResult[] = [];
   let filterGrade = "";
+  let gradeCounts: Record<string, number> = { A: 0, B: 0, C: 0, D: 0, F: 0 };
 
   const autoSwap = () => (page.querySelector("#au-swap") as HTMLInputElement).checked;
 
@@ -156,9 +183,9 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
   const buttons = () => {
     const r = running();
     (page.querySelector("#au-start") as HTMLButtonElement).disabled = r;
-    (page.querySelector("#au-visible") as HTMLButtonElement).disabled = r;
-    (page.querySelector("#au-specific") as HTMLButtonElement).disabled = r;
-    (page.querySelector("#au-today") as HTMLButtonElement).disabled = r;
+    page.querySelector("#au-start-menu")?.querySelectorAll<HTMLButtonElement>("button").forEach((b) => {
+      b.disabled = r;
+    });
     (page.querySelector("#au-pause") as HTMLButtonElement).disabled = !r;
     (page.querySelector("#au-resume") as HTMLButtonElement).disabled = r || !remain();
     (page.querySelector("#au-cancel") as HTMLButtonElement).disabled = !r;
@@ -195,6 +222,14 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
     return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
   };
 
+  const paintGrades = () => {
+    const el = page.querySelector("#au-grades");
+    if (!el) return;
+    el.innerHTML = ["A", "B", "C", "D", "F"]
+      .map((g) => `<span class="au-grade" data-g="${g}">${g}: ${gradeCounts[g] ?? 0}</span>`)
+      .join("");
+  };
+
   const clock = () => {
     const el = page.querySelector("#au-clock");
     if (!el) return;
@@ -221,7 +256,16 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
   const applySnap = (snap: AuditSnapshot) => {
     job = snap.job ?? null;
     feed = snap.feed ?? [];
+    const c = snap.gradeCounts ?? {};
+    gradeCounts = {
+      A: c.A ?? 0,
+      B: c.B ?? 0,
+      C: c.C ?? 0,
+      D: c.D ?? 0,
+      F: c.F ?? 0,
+    };
     paintFeed();
+    paintGrades();
     clock();
     buttons();
   };
@@ -258,7 +302,7 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
         /* keep polling */
       }
     };
-    pollId = window.setInterval(() => void tick(), 400);
+    pollId = window.setInterval(() => void tick(), 1500);
     void tick();
   };
 
@@ -277,7 +321,9 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
         channelIds: ids ?? null,
       });
       feed = [];
+      gradeCounts = { A: 0, B: 0, C: 0, D: 0, F: 0 };
       paintFeed();
+      paintGrades();
       clock();
       buttons();
       startPoll();
@@ -286,8 +332,27 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
     }
   };
 
-  page.querySelector("#au-start")!.addEventListener("click", () => void start(false));
-  page.querySelector("#au-visible")!.addEventListener("click", () => void start(true));
+  const startMenu = page.querySelector<HTMLElement>("#au-start-menu")!;
+  const closeStartMenu = () => {
+    startMenu.hidden = true;
+  };
+  page.querySelector("#au-start")!.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    if (running()) return;
+    startMenu.hidden = !startMenu.hidden;
+  });
+  startMenu.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    const t = (ev.target as HTMLElement).closest("button[data-start]") as HTMLButtonElement | null;
+    if (!t || t.disabled) return;
+    closeStartMenu();
+    const kind = t.dataset.start;
+    if (kind === "all") void start(false);
+    else if (kind === "visible") void start(true);
+    else if (kind === "specific") void openSpecific();
+    else if (kind === "today") void runToday();
+  });
+  page.addEventListener("click", () => closeStartMenu());
   page.querySelector("#au-pause")!.addEventListener("click", () => {
     void invoke("audit_interrupt", { kind: "paused" }).catch((e) => toast(String(e)));
   });
@@ -310,8 +375,45 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
       toast(String(e));
     }
   });
+  const clearDlg = page.querySelector("#au-clear-dlg")!;
+  const runClearAudit = async () => {
+    try {
+      if (running()) {
+        await invoke("audit_interrupt", { kind: "cancelled" });
+      }
+      stopPoll();
+      await invoke("audit_discard");
+      job = null;
+      feed = [];
+      results = [];
+      filterGrade = "";
+      gradeCounts = { A: 0, B: 0, C: 0, D: 0, F: 0 };
+      paintFeed();
+      paintGrades();
+      paintResults();
+      page.querySelector("#au-res-dlg")?.classList.remove("open");
+      clock();
+      buttons();
+      toast("Audit cleared.");
+    } catch (e) {
+      toast(String(e));
+    }
+  };
+  page.querySelector("#au-clear")!.addEventListener("click", () => {
+    clearDlg.classList.add("open");
+  });
+  page.querySelector("#au-clear-no")!.addEventListener("click", () => {
+    clearDlg.classList.remove("open");
+  });
+  page.querySelector("#au-clear-yes")!.addEventListener("click", () => {
+    clearDlg.classList.remove("open");
+    void runClearAudit();
+  });
+  clearDlg.addEventListener("click", (ev) => {
+    if (ev.target === clearDlg) clearDlg.classList.remove("open");
+  });
 
-  page.querySelector("#au-today")!.addEventListener("click", async () => {
+  const runToday = async () => {
     try {
       const [day, groups, ids] = await invoke<[string, string[], string[]]>("audit_today_groups");
       if (groups.length === 0) {
@@ -327,10 +429,10 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
     } catch (e) {
       toast(String(e));
     }
-  });
+  };
 
   const pickDlg = page.querySelector("#au-pick-dlg")!;
-  page.querySelector("#au-specific")!.addEventListener("click", async () => {
+  const openSpecific = async () => {
     try {
       const groups = await invoke<{ title: string; count: number }[]>("list_managed_groups");
       pick = [];
@@ -349,11 +451,16 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
     } catch (e) {
       toast(String(e));
     }
-  });
+  };
 
+  const pickedIds = new Set<string>();
   const paintPick = () => {
     const q = (page.querySelector("#au-pick-q") as HTMLInputElement).value.trim().toLowerCase();
     const el = page.querySelector("#au-pick-list")!;
+    el.querySelectorAll<HTMLInputElement>("input[data-id]").forEach((box) => {
+      if (box.checked && box.dataset.id) pickedIds.add(box.dataset.id);
+      else if (box.dataset.id) pickedIds.delete(box.dataset.id);
+    });
     el.innerHTML = "";
     const groups = [...new Set(pick.map((p) => p.group))];
     for (const g of groups) {
@@ -366,7 +473,8 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
       for (const c of chans) {
         const lab = document.createElement("label");
         lab.className = "check";
-        lab.innerHTML = `<input type="checkbox" data-id="${esc(c.id)}" data-g="${esc(g)}" /> ${esc(c.name)}`;
+        const on = pickedIds.has(c.id) ? " checked" : "";
+        lab.innerHTML = `<input type="checkbox" data-id="${esc(c.id)}" data-g="${esc(g)}"${on} /> ${esc(c.name)}`;
         el.appendChild(lab);
       }
     }
@@ -400,7 +508,10 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
   });
   page.querySelector("#au-pick-cancel")!.addEventListener("click", () => pickDlg.classList.remove("open"));
   page.querySelector("#au-pick-go")!.addEventListener("click", () => {
-    const ids = [...page.querySelectorAll<HTMLInputElement>("#au-pick-list input[data-id]:checked")].map((i) => i.dataset.id!);
+    page.querySelectorAll<HTMLInputElement>("#au-pick-list input[data-id]").forEach((box) => {
+      if (box.checked && box.dataset.id) pickedIds.add(box.dataset.id);
+    });
+    const ids = [...pickedIds];
     if (ids.length === 0) return;
     const backups = (page.querySelector("#au-pick-backups") as HTMLInputElement).checked;
     pickDlg.classList.remove("open");
@@ -463,10 +574,14 @@ export async function mountAudit(page: HTMLElement, toast: (s: string) => void):
   };
 
   page.querySelector("#au-results")!.addEventListener("click", async () => {
-    results = await invoke<AuditResult[]>("audit_results", { jobId: job?.id ?? null });
-    filterGrade = "";
-    paintResults();
-    resDlg.classList.add("open");
+    try {
+      results = await invoke<AuditResult[]>("audit_results", { jobId: job?.id ?? null });
+      filterGrade = "";
+      paintResults();
+      resDlg.classList.add("open");
+    } catch (e) {
+      toast(String(e));
+    }
   });
   page.querySelector("#au-res-close")!.addEventListener("click", () => resDlg.classList.remove("open"));
   page.querySelector("#au-res-export")!.addEventListener("click", async () => {

@@ -2,12 +2,23 @@
 
 ## Purpose
 
-Load M3U/M3U8 playlists from files or URLs, browse groups/channels, search, play, copy, and add rows into the managed playlist. WinUI: `ManualAuditPage` + `AddSourceDialog`.
+Load M3U/M3U8 playlists from files or URLs, browse groups/channels, search, play, copy, and add rows into the managed playlist.
 
 ## Requirements
 
 ### Requirement: Source tabs
-The system SHALL show each loaded playlist as a closable tab, with a `+` control to add a source.
+The system SHALL show each loaded playlist as a closable tab, with a `+` control to add a source. The tab row SHALL put a refresh-all icon and a remove-all (trash) icon on the far right, above the groups/channels table.
+
+#### Scenario: Refresh all sources
+- GIVEN one or more loaded sources
+- WHEN the operator clicks the far-right refresh icon
+- THEN every loaded source is re-fetched (same as per-tab refresh)
+
+#### Scenario: Remove all sources
+- GIVEN one or more loaded sources
+- WHEN the operator clicks the far-right trash icon and confirms
+- THEN every source is removed from the session store
+- AND the empty state is shown
 
 #### Scenario: Empty state
 - GIVEN no sources
@@ -17,7 +28,7 @@ The system SHALL show each loaded playlist as a closable tab, with a `+` control
 #### Scenario: Close tab
 - GIVEN a source tab
 - WHEN the operator closes it
-- THEN that source is removed from the session store (matching C# remove)
+- THEN that source is removed from the session store
 
 ### Requirement: Add file source
 The system SHALL add a source from a local `.m3u` or `.m3u8` file and parse it off the UI thread with a progress indicator.

@@ -1,3 +1,3 @@
 # studio-core
 
-Rust port of `EpgMonsterStudio.Core`. Behavior must stay compatible with the C# SQLite schema and `AppSettings` JSON (PascalCase).
+Rust library for epg.monster studio: SQLite workspace, settings JSON (PascalCase `AppSettings` keys), EPG, logos, audit, and members.

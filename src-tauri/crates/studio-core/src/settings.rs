@@ -1,11 +1,30 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use serde::{Deserialize, Serialize};
-use serde_repr::{Deserialize_repr, Serialize_repr};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+fn deserialize_tuner_kind<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum KindIn {
+        Name(String),
+        Code(i64),
+    }
+    Ok(match KindIn::deserialize(d)? {
+        KindIn::Name(s) if s.eq_ignore_ascii_case("jellyfin") || s == "1" => "Jellyfin".into(),
+        KindIn::Name(s) if s.eq_ignore_ascii_case("emby") || s == "2" => "Emby".into(),
+        KindIn::Name(s) if s.eq_ignore_ascii_case("iptv") || s == "3" => "Iptv".into(),
+        KindIn::Name(s) if !s.is_empty() => s,
+        KindIn::Name(_) | KindIn::Code(0) => "Plex".into(),
+        KindIn::Code(1) => "Jellyfin".into(),
+        KindIn::Code(2) => "Emby".into(),
+        KindIn::Code(3) => "Iptv".into(),
+        KindIn::Code(_) => "Plex".into(),
+    })
+}
 
 use crate::info::USER_AGENT;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(i32)]
 pub enum PlayerEngine {
     #[default]
@@ -13,9 +32,27 @@ pub enum PlayerEngine {
     Vlc = 1,
 }
 
+impl Serialize for PlayerEngine {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_i32(*self as i32)
+    }
+}
+
+impl<'de> Deserialize<'de> for PlayerEngine {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let n = i32::deserialize(deserializer)?;
+        Ok(if n == 1 {
+            PlayerEngine::Vlc
+        } else {
+            PlayerEngine::Mpv
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 pub struct TunerServerProfile {
+    #[serde(deserialize_with = "deserialize_tuner_kind")]
     pub kind: String,
     pub enabled: bool,
     pub running: bool,
@@ -137,6 +174,9 @@ pub struct AppSettings {
     pub logo_save_directory: String,
     pub host_logos_on_tuner: bool,
     pub use_local_logos: bool,
+    /// Local PNG copies share the Save Logos folder. Off by default.
+    #[serde(default)]
+    pub cache_logos: bool,
     pub member_email: String,
     pub member_username: String,
     pub member_access_key: String,
@@ -185,6 +225,7 @@ impl Default for AppSettings {
             logo_save_directory: String::new(),
             host_logos_on_tuner: false,
             use_local_logos: false,
+            cache_logos: false,
             member_email: String::new(),
             member_username: String::new(),
             member_access_key: String::new(),
@@ -265,7 +306,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_match_csharp() {
+    fn defaults_match_app_settings() {
         let s = AppSettings::default();
         assert_eq!(s.audit_delay_ms, 6000);
         assert_eq!(s.audit_timeout_ms, 15000);
@@ -287,6 +328,13 @@ mod tests {
         let back: AppSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.audit_delay_ms, 6000);
         assert_eq!(back.default_player, PlayerEngine::Mpv);
+        let legacy: PlayerEngine = serde_json::from_str("2").unwrap();
+        assert_eq!(legacy, PlayerEngine::Mpv);
+        assert!(!back.cache_logos);
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_object_mut().unwrap().remove("CacheLogos");
+        let old: AppSettings = serde_json::from_value(v).unwrap();
+        assert!(!old.cache_logos);
     }
 
     #[test]
@@ -295,5 +343,19 @@ mod tests {
         p.port = 5004;
         p.ensure_identity();
         assert_eq!(p.port, 8080);
+    }
+
+    #[test]
+    fn tuner_kind_accepts_integer_or_string() {
+        let p: TunerServerProfile = serde_json::from_str(
+            r#"{"Kind":0,"Enabled":true,"Running":false,"FriendlyName":"x","DeviceId":"AA","TunerCount":2,"BindAddress":"127.0.0.1","Port":8080,"AllowLan":false,"RemuxEnabled":true,"DownspiralEnabled":false}"#,
+        )
+        .unwrap();
+        assert_eq!(p.kind, "Plex");
+        let j: TunerServerProfile = serde_json::from_str(
+            r#"{"Kind":1,"Enabled":true,"Running":false,"FriendlyName":"x","DeviceId":"AA","TunerCount":2,"BindAddress":"127.0.0.1","Port":8081,"AllowLan":false,"RemuxEnabled":true,"DownspiralEnabled":false}"#,
+        )
+        .unwrap();
+        assert_eq!(j.kind, "Jellyfin");
     }
 }

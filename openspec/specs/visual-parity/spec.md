@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Exact visual tokens, layout chrome, and copy rules so the remake is indistinguishable from the WinUI 3 studio at a glance. Source: `MainWindow.xaml`, page XAML, `docs/openspec/linux-parity.md` §13.
+Exact visual tokens, layout chrome, and copy rules for epg.monster studio.
 
 ## Requirements
 
@@ -46,10 +46,10 @@ The system MUST NOT introduce a new layout language (light theme, different nav 
 #### Scenario: Nav labels unchanged
 - GIVEN the left pane
 - WHEN the operator reads items
-- THEN labels are exactly `Add Sources`, `Playlist Editor`, `EPG Audit`, `Logo Audit`, `Stream Audit`, `Managed Output`, `TV Tuner`, `Settings`
+- THEN labels are exactly `Add Sources`, `Playlist Editor`, `EPG Audit`, `Logo Audit`, `Stream Audit`, `Managed Output`, `TV Tuner`, `Check For Updates`, `Settings`
 
 ### Requirement: Verbatim copy
-The system SHALL use the same visible strings as the matching WinUI XAML, including the ellipsis character `…` (not `...`) where the source uses it.
+The system SHALL use the shipped visible strings, including the ellipsis character `…` (not `...`) where the UI uses it.
 
 #### Scenario: Search placeholder
 - GIVEN the title-bar search box

@@ -12,8 +12,15 @@ pub fn redact(text: &str) -> String {
     static KEY: OnceLock<Regex> = OnceLock::new();
     static URL: OnceLock<Regex> = OnceLock::new();
     let key = KEY.get_or_init(|| Regex::new(r"(?i)epgm_[A-Za-z0-9_\-]+").expect("key"));
-    let url = URL.get_or_init(|| Regex::new(r#"(?i)https?://[^\s"'<>]+"#).expect("url"));
+    let url = URL.get_or_init(|| {
+        Regex::new(r#"(?i)(?:https?|rtmps?|rtsps?|udp|rtp|mms|mmsh)://[^\s"'<>]+"#).expect("url")
+    });
+    static CREDS: OnceLock<Regex> = OnceLock::new();
+    let creds = CREDS.get_or_init(|| {
+        Regex::new(r#"(?i)(username|password|token|access[_-]?key)=[^&\s"']+"#).expect("creds")
+    });
     let mut s = key.replace_all(text, "epgm_***").into_owned();
+    s = creds.replace_all(&s, "$1=[redacted]").into_owned();
     s = url
         .replace_all(&s, |caps: &regex::Captures| {
             let full = &caps[0];
@@ -36,12 +43,8 @@ pub fn redact(text: &str) -> String {
             if allowed.iter().any(|a| host == *a || host.ends_with(&format!(".{a}"))) {
                 full.to_string()
             } else {
-                let scheme = if full.to_ascii_lowercase().starts_with("https://") {
-                    "https://"
-                } else {
-                    "http://"
-                };
-                format!("{scheme}[redacted]")
+                let scheme = full.split("://").next().unwrap_or("http");
+                format!("{scheme}://[redacted]")
             }
         })
         .into_owned();
@@ -202,6 +205,16 @@ mod tests {
         assert!(s.contains("epgm_***"));
         assert!(s.contains("[redacted]"));
         assert!(!s.contains("provider.example"));
+    }
+
+    #[test]
+    fn redacts_rtmp_and_xtream_query() {
+        let s = redact("rtmp://cdn.example/live get.php?username=alice&password=s3cret");
+        assert!(!s.contains("cdn.example"));
+        assert!(!s.contains("alice"));
+        assert!(!s.contains("s3cret"));
+        assert!(s.contains("username=[redacted]"));
+        assert!(s.contains("password=[redacted]"));
     }
 
     #[test]

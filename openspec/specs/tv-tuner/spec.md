@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Local HDHomeRun-style hosts for Plex, Jellyfin, Emby, plus an IPTV M3U+XMLTV host for TiviMate. WinUI: `TunerPage`, `TunerLogWindow`, `TunerGraphsWindow`, `TunerSetupHelp`, Core `TunerHost`.
+Local HDHomeRun-style hosts for Plex, Jellyfin, Emby, plus an IPTV M3U+XMLTV host for TiviMate.
 
 ## Requirements
 
@@ -77,7 +77,7 @@ The system SHALL remux via bundled ffmpeg (profiles `mpeg2_ac3` default or `copy
 - THEN ffmpeg/VLC is restarted against the backup without leaking the provider URL to `/lineup.json`
 
 ### Requirement: Discovery
-When Settings **Advertise tuners** is on, the system SHALL advertise running tuners on HDHomeRun UDP **65001** and SSDP. Allow LAN binds `0.0.0.0`; advertised URLs still show `127.0.0.1` when generating BaseUrl the C# way unless the operator is on another machine (C# `BaseUrl` uses 127.0.0.1 for display when bind is 0.0.0.0).
+When Settings **Advertise tuners** is on, the system SHALL advertise running tuners on HDHomeRun UDP **65001** and SSDP. Allow LAN binds `0.0.0.0`; advertised URLs still show `127.0.0.1` when bind is `0.0.0.0` unless the operator is on another machine.
 
 #### Scenario: Advertise running only
 - GIVEN Advertise tuners is on and only IPTV is started

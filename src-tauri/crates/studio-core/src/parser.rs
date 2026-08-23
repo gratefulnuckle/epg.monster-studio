@@ -1,14 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use regex::Regex;
 
 use crate::models::ChannelEntry;
 
-/// Port of C# `M3uParser.Parse`.
+fn attr_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?P<key>[\w-]+)\s*=\s*"(?P<value>[^"]*)""#).expect("attr regex"))
+}
+
+/// Parse an M3U/M3U8 playlist into channel rows.
 pub fn parse_m3u(content: &str, source_id: &str) -> Vec<ChannelEntry> {
     let mut list = Vec::new();
+    for_each_m3u_channel(content, source_id, |ch| list.push(ch));
+    list
+}
+
+/// Stream entries so large playlists can be inserted in batches.
+pub fn for_each_m3u_channel(content: &str, source_id: &str, mut visit: impl FnMut(ChannelEntry)) {
     let mut pending: Option<(String, i32)> = None;
     let mut line_no = 0i32;
 
@@ -26,9 +38,9 @@ pub fn parse_m3u(content: &str, source_id: &str) -> Vec<ChannelEntry> {
             continue;
         }
         if let Some((extinf, entry_line)) = pending.take() {
-            list.push(parse_extinf(&extinf, trimmed, source_id, entry_line));
+            visit(parse_extinf(&extinf, trimmed, source_id, entry_line));
         } else {
-            list.push(ChannelEntry {
+            visit(ChannelEntry {
                 source_id: source_id.to_string(),
                 name: trimmed.to_string(),
                 url: trimmed.to_string(),
@@ -38,7 +50,6 @@ pub fn parse_m3u(content: &str, source_id: &str) -> Vec<ChannelEntry> {
             });
         }
     }
-    list
 }
 
 fn parse_extinf(extinf_line: &str, url: &str, source_id: &str, line_no: i32) -> ChannelEntry {
@@ -62,9 +73,8 @@ fn parse_extinf(extinf_line: &str, url: &str, source_id: &str, line_no: i32) -> 
         attr_region.clear();
     }
 
-    let re = Regex::new(r#"(?P<key>[\w-]+)\s*=\s*"(?P<value>[^"]*)""#).expect("attr regex");
     let mut attrs = BTreeMap::<String, String>::new();
-    for cap in re.captures_iter(&attr_region) {
+    for cap in attr_re().captures_iter(&attr_region) {
         attrs.insert(
             cap.name("key").unwrap().as_str().to_string(),
             cap.name("value").unwrap().as_str().to_string(),
@@ -109,15 +119,18 @@ fn parse_extinf(extinf_line: &str, url: &str, source_id: &str, line_no: i32) -> 
     let name = if name_raw.is_empty() {
         url.to_string()
     } else {
-        name_raw.to_string()
+        crate::epg::clean_epg_token(name_raw)
     };
 
     ChannelEntry {
         source_id: source_id.to_string(),
         name,
-        group_title: group.unwrap_or_else(|| "Ungrouped".into()),
-        tvg_id,
-        tvg_name,
+        group_title: group
+            .map(|g| crate::epg::clean_epg_token(&g))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Ungrouped".into()),
+        tvg_id: tvg_id.map(|s| crate::epg::clean_epg_token(&s)).filter(|s| !s.is_empty()),
+        tvg_name: tvg_name.map(|s| crate::epg::clean_epg_token(&s)).filter(|s| !s.is_empty()),
         tvg_logo,
         tvg_shift_hours,
         url: url.trim().to_string(),
@@ -164,11 +177,45 @@ http://example.com/solo
     }
 
     #[test]
+    fn html_entities_in_name_and_group() {
+        let m3u = r#"#EXTM3U
+#EXTINF:-1 tvg-id="A&amp;E.us" group-title="US Locals &amp; Regional",Crime &amp; Investigation
+http://example.com/ae
+"#;
+        let channels = parse_m3u(m3u, "src");
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].name, "Crime & Investigation");
+        assert_eq!(channels[0].group_title, "US Locals & Regional");
+        assert_eq!(channels[0].tvg_id.as_deref(), Some("A&E.us"));
+    }
+
+    #[test]
     fn bare_url_without_extinf() {
         let m3u = "#EXTM3U\nhttp://example.com/raw\n";
         let channels = parse_m3u(m3u, "");
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].url, "http://example.com/raw");
         assert_eq!(channels[0].group_title, "Ungrouped");
+    }
+
+    #[test]
+    fn parse_thousands_of_extinf_rows() {
+        let mut m3u = String::from("#EXTM3U\n");
+        for i in 0..4_000 {
+            m3u.push_str(&format!(
+                "#EXTINF:-1 tvg-id=\"id{i}\" group-title=\"G{g}\",Ch {i}\nhttp://example.com/{i}\n",
+                g = i % 40
+            ));
+        }
+        let started = std::time::Instant::now();
+        let channels = parse_m3u(&m3u, "src-big");
+        assert_eq!(channels.len(), 4_000);
+        assert_eq!(channels[0].tvg_id.as_deref(), Some("id0"));
+        assert_eq!(channels[3999].name, "Ch 3999");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "parse_m3u too slow: {:?}",
+            started.elapsed()
+        );
     }
 }

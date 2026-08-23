@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { bindVirtualList, type VirtualList } from "./virtual";
+import { bindThreeColSplit } from "./split";
 
 export type AuditRow = {
   managedChannelId: string;
@@ -32,28 +34,34 @@ const LEVELS: { score: number; label: string }[] = [
 
 export function epgHtml(): string {
   return `
-    <div class="editor-toolbar">
-      <span class="editor-title">EPG Audit</span>
+    <h1 class="page-title">EPG Audit</h1>
+    <p class="page-sub">1) Pick group  2) Pick channel  3) Type tvg-id for live suggestions  4) Apply. Matched channels hidden unless checked.</p>
+    <div class="editor-workspace">
+    <div class="tabs-row">
       <button class="accent" id="epg-fetch" title="Download epg.monster XMLTV and rebuild the tvg-id catalog">Fetch / refresh catalog</button>
-      <button id="epg-browse" title="Replace the audit panes with a full searchable tvg-id catalog">Browse catalog</button>
+      <button id="epg-browse" title="Open the full searchable tvg-id catalog in a new window">Browse catalog</button>
       <button id="epg-reindex" title="Re-index now playing from the cached XMLTV (no download)">Rebuild now playing</button>
       <button id="epg-refresh">Refresh</button>
-      <button id="epg-auto" title="Pick groups and a score level, then auto-match unique suggestions">Apply suggestion</button>
-      <span class="page-sub" id="epg-count"></span>
+      <button id="epg-auto" title="Pick groups and a score level, then auto-match unique suggestions">Apply suggestions</button>
+      <span class="page-sub" id="epg-count">Loading…</span>
     </div>
     <div class="field" style="max-width:720px">
       <label>XMLTV URL (epg.monster)</label>
       <input id="epg-url" />
     </div>
-    <p class="page-sub">1) Pick group  2) Pick channel  3) Type tvg-id for live suggestions  4) Apply. Matched channels hidden unless checked.</p>
-    <div id="epg-auditor" class="editor-grid">
-      <section class="tile editor-pane"><h2>Groups</h2><div id="epg-groups" class="editor-list"></div></section>
-      <section class="tile editor-pane">
-        <h2>Channels <label class="check" style="display:inline-flex;font-weight:400"><input type="checkbox" id="epg-show-matched" /> Show matched</label></h2>
+    <div id="epg-auditor" class="editor-grid editor-split">
+      <section class="groups editor-pane">
+        <div class="groups-head">Groups</div>
+        <div id="epg-groups" class="groups-body"></div>
+      </section>
+      <div class="split-handle" id="epg-split-groups" title="Drag to resize groups"></div>
+      <section class="channels editor-pane">
+        <div class="groups-head">Channels <label class="check" style="display:inline-flex;font-weight:400;margin-left:8px"><input type="checkbox" id="epg-show-matched" /> Show matched</label></div>
         <div id="epg-channels" class="editor-list"></div>
       </section>
+      <div class="split-handle" id="epg-split-chans" title="Drag to resize channels"></div>
       <section class="tile editor-pane" id="epg-detail">
-        <h2>EPG suggestions</h2>
+        <div class="groups-head">EPG suggestions</div>
         <p class="page-sub" id="epg-detail-empty">Select a channel.</p>
         <div id="epg-detail-body" hidden>
           <div id="epg-detail-name" class="chan-name"></div>
@@ -79,16 +87,9 @@ export function epgHtml(): string {
         </div>
       </section>
     </div>
-    <div id="epg-browser" hidden>
-      <h2>Full tvg-id catalog</h2>
-      <p class="page-sub">Search every tvg-id parsed from the XMLTV guide. Select a row to apply it to the channel you had selected.</p>
-      <button id="epg-browse-back">Back to EPG audit</button>
-      <input id="epg-browse-q" placeholder="Filter catalog by id or name…" />
-      <div id="epg-browse-list" class="editor-list" style="max-height:60vh"></div>
-    </div>
     <div class="dialog-backdrop" id="epg-auto-dlg">
       <div class="dialog" style="width:520px">
-        <h2>Apply suggestion</h2>
+        <h2>Apply suggestions</h2>
         <p class="page-sub">Groups with unmatched or unknown tvg-ids. Pick a score level, select groups, then auto match.</p>
         <div class="field"><label>Approved score level</label>
           <select id="epg-score"></select></div>
@@ -100,10 +101,18 @@ export function epgHtml(): string {
         </div>
       </div>
     </div>
+    </div>
   `;
 }
 
-export async function mountEpg(page: HTMLElement, toast: (s: string) => void): Promise<void> {
+export async function mountEpg(page: HTMLElement, toast: (s: string) => void): Promise<() => void> {
+  const split = page.querySelector<HTMLElement>("#epg-auditor");
+  const splitGroups = page.querySelector<HTMLElement>("#epg-split-groups");
+  const splitChans = page.querySelector<HTMLElement>("#epg-split-chans");
+  if (split && splitGroups && splitChans) {
+    bindThreeColSplit(split, splitGroups, splitChans, "studio-epg");
+  }
+
   const scoreSel = page.querySelector<HTMLSelectElement>("#epg-score")!;
   for (const l of LEVELS) {
     const o = document.createElement("option");
@@ -120,20 +129,21 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
   let groupVirt: VirtualList<string> | null = null;
   let chanVirt: VirtualList<AuditRow> | null = null;
 
-  try {
-    const url = await invoke<string>("epg_guide_url");
-    (page.querySelector("#epg-url") as HTMLInputElement).value = url;
-  } catch { /* ignore */ }
-
   const statusLabel = (s: string) =>
     s === "matched" ? "Matched" : s === "unknown" ? "Unknown ID" : "Missing ID";
 
-  const reload = async () => {
-    rows = await invoke<AuditRow[]>("epg_audit");
-    const n = await invoke<number>("epg_catalog_count");
+  const paintCount = () => {
     const count = page.querySelector("#epg-count");
     if (!count) return;
-    count.textContent = `${n} catalog ids`;
+    const issues = rows.filter((r) => r.status !== "matched").length;
+    count.textContent = `${issues} issues`;
+  };
+
+  const reload = async () => {
+    const count = page.querySelector("#epg-count");
+    if (count) count.textContent = "Loading…";
+    rows = await invoke<AuditRow[]>("epg_audit");
+    paintCount();
     paintGroups();
   };
 
@@ -141,10 +151,13 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
     rows.filter((r) => r.groupTitle === g && r.status !== "matched").length;
 
   const paintGroups = () => {
-    const titles = [...new Set(rows.map((r) => r.groupTitle))];
+    const titles = [...new Set(rows.map((r) => r.groupTitle))].filter(
+      (t) => showMatched || issuesIn(t) > 0,
+    );
     const el = page.querySelector<HTMLElement>("#epg-groups");
     if (!el) return;
-    if (!group && titles[0]) group = titles[0];
+    if (!titles.includes(group)) group = titles[0] ?? "";
+    if (selected && !titles.includes(selected.groupTitle)) selected = null;
     groupVirt?.destroy();
     el.innerHTML = "";
     groupVirt = bindVirtualList({
@@ -154,7 +167,7 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
         const issues = issuesIn(t);
         const b = document.createElement("button");
         b.className = "group-row" + (t === group ? " active" : "");
-        b.innerHTML = `${esc(t)}${issues ? `<span class="issue-n"> ${issues} issues</span>` : ""}`;
+        b.innerHTML = `${esc(t)}<span class="issue-n"> ${issues} issues</span>`;
         b.addEventListener("click", () => {
           group = t;
           selected = null;
@@ -166,6 +179,7 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
     });
     groupVirt.setItems(titles);
     paintChannels();
+    paintDetail();
   };
 
   const paintChannels = () => {
@@ -179,9 +193,16 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
         renderRow: (r) => {
           const b = document.createElement("button");
           b.className = "chan-pick" + (selected?.managedChannelId === r.managedChannelId ? " active" : "");
+          const st = statusLabel(r.status);
+          const stHtml =
+            r.status === "unknown"
+              ? `<span class="issue-n">${esc(st)}</span>`
+              : r.status === "matched"
+                ? ""
+                : `<span class="status-pill">${esc(st)}</span>`;
           b.innerHTML = `<span><span class="chan-name">${esc(r.channelName)}</span>
         <span class="chan-sub">${esc(r.currentTvgId ?? "—")}</span></span>
-        <span class="status-pill">${statusLabel(r.status)}</span>`;
+        ${stHtml}`;
           b.addEventListener("click", () => {
             selected = r;
             paintChannels();
@@ -195,8 +216,9 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
   };
 
   const paintDetail = () => {
-    const empty = page.querySelector<HTMLElement>("#epg-detail-empty")!;
-    const body = page.querySelector<HTMLElement>("#epg-detail-body")!;
+    const empty = page.querySelector<HTMLElement>("#epg-detail-empty");
+    const body = page.querySelector<HTMLElement>("#epg-detail-body");
+    if (!empty || !body) return;
     if (!selected) {
       empty.hidden = false;
       body.hidden = true;
@@ -204,7 +226,9 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
     }
     empty.hidden = true;
     body.hidden = false;
-    page.querySelector("#epg-detail-name")!.textContent = selected.channelName;
+    const nameEl = page.querySelector("#epg-detail-name");
+    if (!nameEl) return;
+    nameEl.textContent = selected.channelName;
     page.querySelector("#epg-detail-status")!.textContent = statusLabel(selected.status);
     page.querySelector("#epg-detail-score")!.textContent = selected.suggestedTvgId
       ? `Suggestion score: ${selected.score.toFixed(2)} (${selected.matchKind ?? "fuzzy"})`
@@ -215,18 +239,51 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
       ? `${selected.suggestedTvgId}  —  ${selected.suggestedName ?? ""}  (score ${selected.score.toFixed(2)})`
       : "(no suggestion)";
     void updateKnown();
+    void fillMoreMatches();
+  };
+
+  const fillMoreMatches = async () => {
+    const more = page.querySelector("#epg-more");
+    const box = page.querySelector<HTMLInputElement>("#epg-tvg");
+    if (!more || !box || !selected) return;
+    const q = (selected.channelName || box.value).trim();
+    if (!q) {
+      more.innerHTML = "";
+      return;
+    }
+    try {
+      const hits = await invoke<{ tvgId: string; name: string; line: string }[]>("suggest_tvg", { query: q });
+      if (!page.querySelector("#epg-more")) return;
+      const extra = hits.filter((h) => h.tvgId !== box.value.trim()).slice(0, 8);
+      more.innerHTML = extra
+        .map((h) => `<button type="button" class="suggest-item" data-tvg="${esc(h.tvgId)}">${esc(h.line)}</button>`)
+        .join("");
+      more.querySelectorAll<HTMLButtonElement>("button[data-tvg]").forEach((b) => {
+        b.addEventListener("click", () => {
+          box.value = b.dataset.tvg ?? "";
+          void updateKnown();
+        });
+      });
+    } catch {
+      /* leave empty */
+    }
   };
 
   const updateKnown = async () => {
-    const tvg = (page.querySelector("#epg-tvg") as HTMLInputElement).value.trim();
+    const box = page.querySelector<HTMLInputElement>("#epg-tvg");
+    if (!box) return;
+    const tvg = box.value.trim();
     const known = tvg ? await invoke<boolean>("is_known_tvg", { tvgId: tvg }) : false;
-    page.querySelector<HTMLElement>("#epg-tvg-check")!.hidden = !known;
-    page.querySelector("#epg-tvg")!.classList.toggle("tvg-ok", known);
+    const check = page.querySelector<HTMLElement>("#epg-tvg-check");
+    const input = page.querySelector("#epg-tvg");
+    if (!check || !input) return;
+    check.hidden = !known;
+    input.classList.toggle("tvg-ok", known);
   };
 
   page.querySelector("#epg-show-matched")!.addEventListener("change", (ev) => {
     showMatched = (ev.target as HTMLInputElement).checked;
-    paintChannels();
+    paintGroups();
   });
 
   page.querySelector("#epg-fetch")!.addEventListener("click", async () => {
@@ -240,7 +297,9 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
       toast(String(e));
     }
   });
-  page.querySelector("#epg-refresh")!.addEventListener("click", () => void reload());
+  page.querySelector("#epg-refresh")!.addEventListener("click", () =>
+    void reload().catch((e) => toast(String(e))),
+  );
   page.querySelector("#epg-reindex")!.addEventListener("click", async () => {
     try {
       toast(await invoke<string>("rebuild_now_playing"));
@@ -269,8 +328,12 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
 
   page.querySelector("#epg-images")!.addEventListener("click", async () => {
     if (!selected) return;
-    const url = await invoke<string>("epg_search_images_url", { name: selected.channelName });
-    await openUrl(url);
+    try {
+      const url = await invoke<string>("epg_search_images_url", { name: selected.channelName });
+      await openUrl(url);
+    } catch (e) {
+      toast(String(e));
+    }
   });
 
   const sug = page.querySelector<HTMLElement>("#epg-suggest")!;
@@ -280,12 +343,20 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
     window.clearTimeout(t);
     t = window.setTimeout(async () => {
       await updateKnown();
+      if (!page.querySelector("#epg-tvg")) return;
       const q = tvgBox.value.trim();
       if (!q) {
         sug.hidden = true;
         return;
       }
-      const hits = await invoke<{ tvgId: string; name: string; line: string }[]>("suggest_tvg", { query: q });
+      let hits: { tvgId: string; name: string; line: string }[] = [];
+      try {
+        hits = await invoke("suggest_tvg", { query: q });
+      } catch (e) {
+        toast(String(e));
+        return;
+      }
+      if (!page.querySelector("#epg-suggest")) return;
       sug.innerHTML = "";
       for (const h of hits) {
         const b = document.createElement("button");
@@ -299,6 +370,20 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
         sug.appendChild(b);
       }
       sug.hidden = hits.length === 0;
+      const more = page.querySelector("#epg-more");
+      if (more) {
+        const extra = hits.filter((h) => h.tvgId !== tvgBox.value.trim()).slice(0, 8);
+        more.innerHTML = extra
+          .map((h) => `<button type="button" class="suggest-item" data-tvg="${esc(h.tvgId)}">${esc(h.line)}</button>`)
+          .join("");
+        more.querySelectorAll<HTMLButtonElement>("button[data-tvg]").forEach((b) => {
+          b.addEventListener("click", () => {
+            tvgBox.value = b.dataset.tvg ?? "";
+            sug.hidden = true;
+            void updateKnown();
+          });
+        });
+      }
     }, 120);
   });
 
@@ -357,56 +442,51 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
     }
   });
 
-  const auditor = page.querySelector<HTMLElement>("#epg-auditor")!;
-  const browser = page.querySelector<HTMLElement>("#epg-browser")!;
   page.querySelector("#epg-browse")!.addEventListener("click", async () => {
-    auditor.hidden = true;
-    browser.hidden = false;
-    const catalog = await invoke<CatalogEntry[]>("epg_browse_catalog");
-    paintBrowse(catalog, "");
-    page.querySelector("#epg-browse-q")!.addEventListener("input", (ev) => {
-      paintBrowse(catalog, (ev.target as HTMLInputElement).value);
-    });
-  });
-  page.querySelector("#epg-browse-back")!.addEventListener("click", () => {
-    browser.hidden = true;
-    auditor.hidden = false;
+    try {
+      await invoke("open_epg_catalog_window");
+    } catch (e) {
+      toast(String(e));
+    }
   });
 
-  function paintBrowse(catalog: CatalogEntry[], q: string) {
-    const el = page.querySelector("#epg-browse-list")!;
-    el.innerHTML = "";
-    const ql = q.trim().toLowerCase();
-    let last = "";
-    for (const c of catalog) {
-      if (ql && !c.tvgId.toLowerCase().includes(ql) && !c.name.toLowerCase().includes(ql)) continue;
-      const sec = sectionDisplay(c.section);
-      if (sec !== last) {
-        const h = document.createElement("div");
-        h.className = "issue-n";
-        h.style.padding = "8px 4px";
-        h.textContent = sec;
-        el.appendChild(h);
-        last = sec;
-      }
-      const row = document.createElement("div");
-      row.className = "chan-sub";
-      row.style.padding = "4px";
-      row.textContent = `${c.tvgId}  —  ${c.name}`;
-      el.appendChild(row);
+  let stopPick: (() => void) | undefined;
+  void listen<{ tvgId: string; name: string }>("epg-catalog-pick", async (ev) => {
+    if (!page.querySelector("#epg-auditor")) return;
+    const tvg = ev.payload.tvgId?.trim();
+    if (!tvg) return;
+    if (!selected) {
+      toast("Select a channel on EPG Audit first");
+      return;
     }
-  }
+    try {
+      const box = page.querySelector<HTMLInputElement>("#epg-tvg");
+      if (box) box.value = tvg;
+      await invoke("epg_apply", {
+        managedId: selected.managedChannelId,
+        tvgId: tvg,
+        logo: selected.suggestedLogo,
+        applyLogo: false,
+      });
+      toast(`Applied ${tvg}`);
+      await reload();
+    } catch (e) {
+      toast(String(e));
+    }
+  }).then((un) => {
+    stopPick = un;
+  });
 
   try {
-    await reload();
+    const urlP = invoke<string>("epg_guide_url").then((url) => {
+      const box = page.querySelector<HTMLInputElement>("#epg-url");
+      if (box) box.value = url;
+    });
+    await Promise.all([urlP, reload()]);
   } catch (e) {
     toast(String(e));
   }
-}
-
-function sectionDisplay(section: string): string {
-  if (!section.trim()) return "Other";
-  return section.replace(/\d+$/, "") || section;
+  return () => stopPick?.();
 }
 
 function esc(s: string): string {

@@ -1,22 +1,86 @@
 {
   "schema": "epg.monster.tools",
-  "version": 1,
+  "version": 2,
   "tools": [
     {
       "id": "ffmpeg",
       "label": "ffmpeg essentials",
-      "url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.1-essentials_build.zip",
-      "sha256": "FEC81AE03971D9DD4BE3EBE02E263BD2EC1D789483F931BDBA5F5715E65DA2E9",
-      "exeNames": [ "ffmpeg.exe", "ffprobe.exe" ],
-      "destSubdir": "ffmpeg"
+      "destSubdir": "ffmpeg",
+      "targets": [
+        {
+          "host": "windows-x86_64",
+          "source": "system",
+          "exeNames": ["ffmpeg.exe", "ffprobe.exe"],
+          "installHint": "Install ffmpeg (includes ffprobe): winget install Gyan.FFmpeg   or   choco install ffmpeg   or   scoop install ffmpeg. Then run studio.ps1 --install."
+        },
+        {
+          "host": "linux-x86_64",
+          "source": "system",
+          "exeNames": ["ffmpeg", "ffprobe"],
+          "installHint": "Install ffmpeg from your package manager (Debian/Ubuntu/XFCE: sudo apt install ffmpeg · Fedora: sudo dnf install ffmpeg)."
+        },
+        {
+          "host": "linux-aarch64",
+          "source": "system",
+          "exeNames": ["ffmpeg", "ffprobe"],
+          "installHint": "Install ffmpeg from your package manager (e.g. sudo apt install ffmpeg)."
+        },
+        {
+          "host": "macos-x86_64",
+          "source": "system",
+          "exeNames": ["ffmpeg", "ffprobe"],
+          "installHint": "Install ffmpeg with Homebrew: brew install ffmpeg"
+        },
+        {
+          "host": "macos-aarch64",
+          "source": "system",
+          "exeNames": ["ffmpeg", "ffprobe"],
+          "installHint": "Install ffmpeg with Homebrew: brew install ffmpeg"
+        }
+      ]
     },
     {
       "id": "mpv",
       "label": "mpv",
-      "url": "https://github.com/mpv-player/mpv/releases/download/v0.41.0/mpv-v0.41.0-x86_64-pc-windows-msvc.zip",
-      "sha256": "4E197F729F5071C6772F35FFFD96E0F36E3E8A044BD9479B136BB09B7C6A80FF",
-      "exeNames": [ "mpv.exe" ],
-      "destSubdir": "mpv"
+      "destSubdir": "mpv",
+      "optional": true,
+      "targets": [
+        {
+          "host": "windows-x86_64",
+          "source": "system",
+          "optional": true,
+          "exeNames": ["mpv.exe"],
+          "installHint": "Optional. Set an mpv.exe path in Settings if you want Play to use mpv."
+        },
+        {
+          "host": "linux-x86_64",
+          "source": "system",
+          "optional": true,
+          "exeNames": ["mpv"],
+          "installHint": "Optional. Set an mpv path in Settings if you want Play to use mpv."
+        },
+        {
+          "host": "linux-aarch64",
+          "source": "system",
+          "optional": true,
+          "exeNames": ["mpv"],
+          "installHint": "Optional. Set an mpv path in Settings if you want Play to use mpv."
+        },
+        {
+          "host": "macos-x86_64",
+          "source": "system",
+          "optional": true,
+          "exeNames": ["mpv"],
+          "installHint": "Optional. Set an mpv path in Settings if you want Play to use mpv."
+        },
+        {
+          "host": "macos-aarch64",
+          "source": "system",
+          "optional": true,
+          "exeNames": ["mpv"],
+          "installHint": "Optional. Set an mpv path in Settings if you want Play to use mpv."
+        }
+      ]
     }
   ]
 }

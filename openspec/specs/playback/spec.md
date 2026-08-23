@@ -2,7 +2,7 @@
 
 ## Purpose
 
-External playback via mpv or VLC, and location of bundled ffmpeg/ffprobe/mpv. C#: `PlayerService`, `ToolPaths`, `ToolBootstrap`.
+External playback via mpv or VLC, and location of ffmpeg/ffprobe/mpv.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ The system SHALL launch the configured default player when Play is pressed on a 
 #### Scenario: Missing binary
 - GIVEN the configured path does not exist
 - WHEN Play is invoked
-- THEN an error tells the operator to configure the path in Settings (C# wording)
+- THEN an error tells the operator to configure the path in Settings
 
 ### Requirement: Bundled tools
 The system SHALL look for portable tools under `{app}/tools/mpv/mpv.exe` and `{app}/tools/ffmpeg/ffmpeg.exe` + `ffprobe.exe`, and **Detect bundled tools** fills Settings paths.
@@ -32,7 +32,7 @@ The system SHALL look for portable tools under `{app}/tools/mpv/mpv.exe` and `{a
 #### Scenario: First-run heal
 - GIVEN empty path settings and bundled binaries exist
 - WHEN settings load
-- THEN paths are filled to the bundled locations (C# `LoadSettingsWithDefaults`)
+- THEN paths are filled to the bundled locations
 
 ### Requirement: Python engine optional
 The system SHALL accept an optional Python path for `engines/` workers (JSON protocol in source `engines/README.md`) without requiring Python for any v1.0-beta critical path.

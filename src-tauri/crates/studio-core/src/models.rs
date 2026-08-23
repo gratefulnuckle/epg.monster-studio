@@ -153,4 +153,6 @@ pub struct PlaylistSource {
     pub location: String,
     pub headers_json: String,
     pub channel_count: i32,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
 }

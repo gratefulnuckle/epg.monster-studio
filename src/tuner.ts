@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import type { AppSettings, TunerProfile } from "./settings";
 
 export type TunerStatus = {
   kind: string;
@@ -14,6 +15,14 @@ export type TunerStatus = {
   error?: string | null;
   statusLabel: string;
   advertisedEpg?: string;
+};
+
+export type TunerPickRow = {
+  id: string;
+  name: string;
+  group: string;
+  included: boolean;
+  number?: number | null;
 };
 
 type LogLine = { at: string; kind: string; line: string };
@@ -32,20 +41,84 @@ type GraphRow = {
 type ProbeStep = { Client: string; Name: string; Ok: boolean; Detail: string };
 type ProbeReport = { Kind: string; BaseUrl: string; Steps: ProbeStep[] };
 
+const LANDING: { kind: string; name: string; icon: string }[] = [
+  { kind: "Plex", name: "Plex", icon: "/tuner/plex.svg" },
+  { kind: "Jellyfin", name: "Jellyfin", icon: "/tuner/jellyfin.svg" },
+  { kind: "Emby", name: "Emby", icon: "/tuner/emby.png" },
+  { kind: "Iptv", name: "IPTV", icon: "/tuner/iptv.svg" },
+];
+
 export function tunerHtml(): string {
   return `
-    <div class="editor-toolbar">
-      <span class="editor-title">TV Tuner</span>
-      <button class="accent" id="tn-start-all">Start all enabled</button>
-      <button id="tn-stop-all">Stop all</button>
-      <button id="tn-log" title="Verbose tuner log">Log</button>
-      <button id="tn-graphs" title="Live tuner stats">Graphs</button>
-      <button id="tn-test" title="Mimic Plex / Jellyfin / Emby / TiviMate HTTP without those apps">Self-test</button>
-      <span class="page-sub" id="tn-summary"></span>
+    <div id="tn-view-landing">
+      <h1 class="page-title">TV Tuner</h1>
+      <p class="page-sub">Choose a tuner to start, set options, and pick the channel list. Ports are 8080 Plex, 8081 Jellyfin, 8082 Emby, 8083 IPTV.</p>
+      <div class="tabs-row">
+        <button class="accent" id="tn-start-all">Start all enabled</button>
+        <button id="tn-stop-all">Stop all</button>
+        <button id="tn-log" title="Verbose tuner log">Log</button>
+        <button id="tn-graphs" title="Live tuner stats">Graphs</button>
+        <button id="tn-test" title="Mimic Plex / Jellyfin / Emby / TiviMate HTTP without those apps">Self-test</button>
+        <span class="page-sub" id="tn-summary"></span>
+      </div>
+      <div class="tn-landing">
+        <div class="tn-landing-row" id="tn-row-media"></div>
+        <div class="tn-landing-row tn-landing-row-iptv" id="tn-row-iptv"></div>
+      </div>
+      <label class="check tn-disco"><input type="checkbox" id="tn-disco" /> Advertise tuners on the network (HDHomeRun UDP 65001 + SSDP). Turn on Allow LAN if Plex is another PC.</label>
     </div>
-    <p class="page-sub">Start and stop the local tuner hosts. Enable a card in Settings, then Start here. Ports are 8080 Plex, 8081 Jellyfin, 8082 Emby, 8083 IPTV. Channel numbers stay in Managed Output → Tuner lineup.</p>
-    <p class="page-sub" id="tn-empty" hidden>Enable a tuner in Settings (Plex, Jellyfin, Emby, or IPTV), Save, then press Start on that card.</p>
-    <div id="tn-cards"></div>
+    <div id="tn-view-detail" class="editor-workspace" hidden>
+      <div class="tabs-row">
+        <button id="tn-back" type="button">Back</button>
+        <span class="editor-title" id="tn-detail-title">Tuner</span>
+        <button class="accent" id="tn-start" type="button">Start</button>
+        <button id="tn-stop" type="button">Stop</button>
+        <button id="tn-log-one" type="button">Log</button>
+        <button id="tn-graphs-one" type="button">Graphs</button>
+        <button id="tn-info" type="button">Info</button>
+        <button id="tn-links" type="button">Open TV tuner links</button>
+        <span class="page-sub" id="tn-detail-status"></span>
+      </div>
+      <p class="page-sub" id="tn-detail-urls" style="user-select:text;margin-bottom:8px"></p>
+      <div class="tn-detail-body">
+        <section class="tile tn-settings">
+          <h2>Settings</h2>
+          <p class="hint" id="tn-settings-hint">Saved with this tuner. Start and stop live above.</p>
+          <label class="check"><input type="checkbox" id="tn-on" /> Enable this tuner</label>
+          <div class="field"><label>Friendly name</label><input id="tn-name" /></div>
+          <div class="field"><label>Port</label><input id="tn-port" type="number" /></div>
+          <div class="field"><label>Tuner count</label><input id="tn-count" type="number" min="1" max="16" /></div>
+          <label class="check"><input type="checkbox" id="tn-lan" /> Allow LAN</label>
+          <div id="tn-jelly-extra" hidden>
+            <label class="check"><input type="checkbox" id="tn-down" /> Downspiral — one playlist + guide per group (switch lists without changing Jellyfin profiles)</label>
+          </div>
+          <div id="tn-iptv-extra" hidden>
+            <label class="check"><input type="checkbox" id="tn-remux" /> Remux IPTV playlist through Studio (MPEG-TS)</label>
+            <div class="field"><label>Tuner EPG for IPTV players</label>
+              <select id="tn-epgsrc">
+                <option value="0">Local Studio guide (/guide.xml)</option>
+                <option value="1">my.epg.monster curated feed</option>
+              </select></div>
+            <p class="page-sub" id="tn-epghint"></p>
+          </div>
+          <button class="accent" id="tn-save" type="button">Save settings</button>
+        </section>
+        <section class="tile tn-lineup">
+          <h2>Tuner channel list</h2>
+          <p class="hint">Checked channels are published to every enabled tuner. Auto Populate numbers the checked rows 1, 2, 3… in playlist group order (or every row if none are checked) and saves. Manual checkbox or number edits need Save list.</p>
+          <div class="tabs-row">
+            <button id="tn-auto" type="button">Auto Populate</button>
+            <button class="accent" id="tn-lsave" type="button">Save list</button>
+          </div>
+          <div class="tn-search-row">
+            <label class="tn-search-label">Search</label>
+            <span class="page-sub" id="tn-lineup-count"></span>
+          </div>
+          <input id="tn-lq" placeholder="name or group…" />
+          <div id="tn-lpicks" class="editor-list tn-lpicks"></div>
+        </section>
+      </div>
+    </div>
     <div class="dialog-backdrop" id="tn-dlg">
       <div class="dialog" style="width:640px;max-height:80vh;overflow:auto">
         <h2 id="tn-dlg-title"></h2>
@@ -109,8 +182,9 @@ export function tunerHtml(): string {
   `;
 }
 
-export async function mountTuner(page: HTMLElement, toast: (s: string) => void): Promise<void> {
+export async function mountTuner(page: HTMLElement, toast: (s: string) => void): Promise<() => void> {
   let rows: TunerStatus[] = [];
+  let currentKind = "";
   let logPause = false;
   let logKind = "";
   let links: { label: string; url: string }[] = [];
@@ -118,64 +192,160 @@ export async function mountTuner(page: HTMLElement, toast: (s: string) => void):
   let lastTestJson = "";
   let logTimer = 0;
   let graphTimer = 0;
+  let picks: TunerPickRow[] = [];
+  let settings: AppSettings | null = null;
+
+  const landing = page.querySelector<HTMLElement>("#tn-view-landing")!;
+  const detail = page.querySelector<HTMLElement>("#tn-view-detail")!;
 
   const epgOf = (s: TunerStatus) =>
     (s.advertisedEpg && s.advertisedEpg.trim()) || `${s.baseUrl.replace(/\/$/, "")}/guide.xml`;
 
-  const paint = () => {
-    const el = page.querySelector("#tn-cards")!;
-    el.innerHTML = "";
-    for (const s of rows) {
-      const card = document.createElement("section");
-      card.className = "tile tuner-card";
-      const status = s.error
-        ? `${s.statusLabel} · ${s.error}`
-        : `${s.statusLabel} · port ${s.port} · ${s.deviceId}`;
-      const conn = s.running
-        ? `${s.activeConnections} of ${s.maxConnections} connections in use`
-        : `0 of ${s.maxConnections} connections (stopped)`;
-      const epg = epgOf(s);
-      const detail =
-        s.kind === "Iptv"
-          ? `Playlist ${s.baseUrl}/playlist.m3u8   ·   EPG ${epg}`
-          : `${s.baseUrl}   ·   EPG ${epg}`;
-      card.innerHTML = `
-        <div class="tuner-head">
-          <div>
-            <div class="chan-name" style="font-size:16px">${esc(s.friendlyName)}</div>
-            <div class="chan-sub">${esc(status)}</div>
-          </div>
-          <div class="tuner-actions">
-            <button data-start="${esc(s.kind)}" ${s.enabled && !s.running ? "" : "disabled"}>Start</button>
-            <button data-stop="${esc(s.kind)}" ${s.running ? "" : "disabled"}>Stop</button>
-            <button data-log="${esc(s.kind)}">Log</button>
-            <button data-graphs="${esc(s.kind)}">Graphs</button>
-            <button data-info="${esc(s.kind)}">Info</button>
-          </div>
-        </div>
-        <div class="chan-name">${esc(conn)}</div>
-        <div class="field" style="max-width:180px">
-          <label>Allowed connections</label>
-          <input type="number" min="1" max="16" value="${s.maxConnections}" data-max="${esc(s.kind)}" />
-        </div>
-        <button data-links="${esc(s.kind)}" ${s.enabled ? "" : "disabled"}>Open TV tuner links</button>
-        <p class="page-sub" style="user-select:text">${esc(detail)}</p>`;
-      el.appendChild(card);
+  const profileOf = (st: AppSettings, kind: string): TunerProfile => {
+    if (kind === "Jellyfin") return st.JellyfinTuner;
+    if (kind === "Emby") return st.EmbyTuner;
+    if (kind === "Iptv") return st.IptvTuner;
+    return st.PlexTuner;
+  };
+
+  const paintLanding = () => {
+    const media = page.querySelector("#tn-row-media")!;
+    const iptvRow = page.querySelector("#tn-row-iptv")!;
+    if (!media.querySelector(".tn-pick")) {
+      for (const item of LANDING) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = item.kind === "Iptv" ? "tn-pick tn-pick-iptv" : "tn-pick";
+        btn.dataset.kind = item.kind;
+        btn.setAttribute("aria-label", item.name);
+        btn.title = item.name;
+        const label =
+          item.kind === "Iptv" ? `<span class="tn-pick-name">${esc(item.name)}</span>` : "";
+        btn.innerHTML = `<img class="tn-pick-icon" src="${item.icon}" alt="${esc(item.name)}" />${label}`;
+        (item.kind === "Iptv" ? iptvRow : media).appendChild(btn);
+      }
+    }
+    for (const item of LANDING) {
+      const s = rows.find((r) => r.kind === item.kind);
+      const btn = page.querySelector<HTMLButtonElement>(`button.tn-pick[data-kind="${item.kind}"]`);
+      if (!btn) continue;
+      btn.classList.toggle("is-running", !!s?.running);
+      btn.classList.toggle("is-enabled", !!s?.enabled && !s?.running);
     }
     const enabled = rows.filter((r) => r.enabled);
     const running = rows.filter((r) => r.running);
     const active = rows.reduce((n, r) => n + r.activeConnections, 0);
     page.querySelector("#tn-summary")!.textContent =
       enabled.length === 0
-        ? "All four tuners listed · none enabled in Settings"
+        ? "None enabled — open a tuner to turn it on"
         : `${enabled.length} enabled · ${running.length} running · ${active} live connection(s)`;
     (page.querySelector("#tn-start-all") as HTMLButtonElement).disabled = !enabled.some((s) => !s.running);
     (page.querySelector("#tn-stop-all") as HTMLButtonElement).disabled = running.length === 0;
   };
 
+  const paintDetailStatus = () => {
+    const s = rows.find((r) => r.kind === currentKind);
+    if (!s) return;
+    const status = s.error
+      ? `${s.statusLabel} · ${s.error}`
+      : `${s.statusLabel} · port ${s.port} · ${s.deviceId}`;
+    const conn = s.running
+      ? `${s.activeConnections} of ${s.maxConnections} connections in use`
+      : `0 of ${s.maxConnections} connections (stopped)`;
+    const epg = epgOf(s);
+    const detailLine =
+      s.kind === "Iptv"
+        ? `Playlist ${s.baseUrl}/playlist.m3u8   ·   EPG ${epg}`
+        : `${s.baseUrl}   ·   EPG ${epg}`;
+    page.querySelector("#tn-detail-title")!.textContent = s.friendlyName;
+    page.querySelector("#tn-detail-status")!.textContent = `${status} · ${conn}`;
+    page.querySelector("#tn-detail-urls")!.textContent = detailLine;
+    (page.querySelector("#tn-start") as HTMLButtonElement).disabled = !(s.enabled && !s.running);
+    (page.querySelector("#tn-stop") as HTMLButtonElement).disabled = !s.running;
+    (page.querySelector("#tn-links") as HTMLButtonElement).disabled = !s.enabled;
+  };
+
+  const fillSettingsForm = (st: AppSettings, kind: string) => {
+    const p = profileOf(st, kind);
+    (page.querySelector("#tn-on") as HTMLInputElement).checked = p.Enabled;
+    (page.querySelector("#tn-name") as HTMLInputElement).value = p.FriendlyName ?? "";
+    (page.querySelector("#tn-port") as HTMLInputElement).value = String(p.Port);
+    (page.querySelector("#tn-count") as HTMLInputElement).value = String(p.TunerCount);
+    (page.querySelector("#tn-lan") as HTMLInputElement).checked = p.AllowLan;
+    const jelly = page.querySelector<HTMLElement>("#tn-jelly-extra")!;
+    const iptv = page.querySelector<HTMLElement>("#tn-iptv-extra")!;
+    jelly.hidden = kind !== "Jellyfin";
+    iptv.hidden = kind !== "Iptv";
+    if (kind === "Jellyfin") {
+      (page.querySelector("#tn-down") as HTMLInputElement).checked = !!p.DownspiralEnabled;
+    }
+    if (kind === "Iptv") {
+      (page.querySelector("#tn-remux") as HTMLInputElement).checked = p.RemuxEnabled !== false;
+      const hasFeed = !!(st.MemberFeedUrlGz || st.MemberFeedUrl);
+      (page.querySelector("#tn-epgsrc") as HTMLSelectElement).value = st.TunerUseMemberEpg && hasFeed ? "1" : "0";
+      page.querySelector("#tn-epghint")!.textContent = hasFeed
+        ? "Curated feed: " + (st.MemberFeedUrlGz || st.MemberFeedUrl)
+        : "Upload channels.json first to use the my.epg.monster feed as tuner EPG.";
+    }
+  };
+
+  const paintPicks = () => {
+    const q = (page.querySelector("#tn-lq") as HTMLInputElement).value.trim().toLowerCase();
+    const el = page.querySelector("#tn-lpicks")!;
+    el.innerHTML = "";
+    let shown = 0;
+    for (const p of picks) {
+      if (q && !p.name.toLowerCase().includes(q) && !p.group.toLowerCase().includes(q)) continue;
+      shown += 1;
+      const row = document.createElement("div");
+      row.className = "lineup-row";
+      row.innerHTML = `<label class="check"><input type="checkbox" data-id="${esc(p.id)}" ${p.included ? "checked" : ""} />
+        <span><span class="chan-name">${esc(p.name)}</span><span class="chan-sub">${esc(p.group)}</span></span></label>
+        <input class="lineup-num" data-nid="${esc(p.id)}" placeholder="#" value="${p.number ?? ""}" />`;
+      el.appendChild(row);
+    }
+    el.querySelectorAll<HTMLInputElement>("input[data-id]").forEach((box) => {
+      box.addEventListener("change", () => {
+        const p = picks.find((x) => x.id === box.dataset.id);
+        if (p) p.included = box.checked;
+      });
+    });
+    el.querySelectorAll<HTMLInputElement>("input[data-nid]").forEach((inp) => {
+      inp.addEventListener("change", () => {
+        const p = picks.find((x) => x.id === inp.dataset.nid);
+        if (!p) return;
+        const n = parseInt(inp.value.trim(), 10);
+        p.number = Number.isFinite(n) && n > 0 ? n : null;
+      });
+    });
+    const included = picks.filter((p) => p.included).length;
+    page.querySelector("#tn-lineup-count")!.textContent = `${included} in lineup · ${shown} shown`;
+  };
+
+  const showLanding = () => {
+    currentKind = "";
+    landing.hidden = false;
+    detail.hidden = true;
+    paintLanding();
+  };
+
+  const showDetail = async (kind: string) => {
+    currentKind = kind;
+    landing.hidden = true;
+    detail.hidden = false;
+    settings = await invoke<AppSettings>("load_settings");
+    if (!page.querySelector("#tn-view-detail")) return;
+    fillSettingsForm(settings, kind);
+    paintDetailStatus();
+    picks = await invoke<TunerPickRow[]>("lineup_candidates");
+    (page.querySelector("#tn-lq") as HTMLInputElement).value = "";
+    paintPicks();
+  };
+
   const reload = async () => {
     rows = await invoke<TunerStatus[]>("tuner_statuses");
-    paint();
+    if (currentKind) paintDetailStatus();
+    else paintLanding();
   };
 
   const infoDlg = (title: string, body: string) => {
@@ -196,10 +366,14 @@ export async function mountTuner(page: HTMLElement, toast: (s: string) => void):
 
   const paintLog = async () => {
     if (logPause) return;
+    const body = page.querySelector("#tn-log-body");
+    const count = page.querySelector("#tn-log-count");
+    if (!body || !count) return;
     const lines = await invoke<LogLine[]>("tuner_logs");
+    if (!page.querySelector("#tn-log-body")) return;
     const shown = logKind ? lines.filter((l) => l.kind === logKind || !l.kind) : lines;
-    page.querySelector("#tn-log-body")!.textContent = shown.map(fmtLog).join("\n") || "(empty)";
-    page.querySelector("#tn-log-count")!.textContent = `${shown.length} line(s)`;
+    body.textContent = shown.map(fmtLog).join("\n") || "(empty)";
+    count.textContent = `${shown.length} line(s)`;
   };
 
   const openLog = (kind: string) => {
@@ -220,7 +394,9 @@ export async function mountTuner(page: HTMLElement, toast: (s: string) => void):
   };
 
   const paintGraphs = async () => {
+    if (!page.querySelector("#tn-graph-sum")) return;
     const g = await invoke<GraphRow[]>("tuner_graphs");
+    if (!page.querySelector("#tn-graph-sum")) return;
     const live = g.reduce((n, r) => n + r.live, 0);
     const req = g.reduce((n, r) => n + r.discover + r.lineup + r.guide + r.m3u + r.stream, 0);
     page.querySelector("#tn-graph-sum")!.textContent =
@@ -393,59 +569,139 @@ export async function mountTuner(page: HTMLElement, toast: (s: string) => void):
     }
   });
 
-  page.addEventListener("click", async (ev) => {
-    const t = ev.target as HTMLElement;
-    const start = t.getAttribute("data-start");
-    const stop = t.getAttribute("data-stop");
-    const info = t.getAttribute("data-info");
-    const log = t.getAttribute("data-log");
-    const graphs = t.getAttribute("data-graphs");
-    const linkKind = t.getAttribute("data-links");
+  landing.addEventListener("click", (ev) => {
+    const btn = (ev.target as HTMLElement).closest<HTMLButtonElement>("button.tn-pick");
+    if (!btn?.dataset.kind) return;
+    void showDetail(btn.dataset.kind).catch((e) => toast(String(e)));
+  });
+
+  page.querySelector("#tn-back")!.addEventListener("click", () => showLanding());
+
+  page.querySelector("#tn-start")!.addEventListener("click", async () => {
+    if (!currentKind) return;
     try {
-      if (start) {
-        const msg = await invoke<string>("tuner_start", { kind: start });
-        toast(msg);
-        await reload();
-      } else if (stop) {
-        await invoke("tuner_stop", { kind: stop });
-        await reload();
-        toast(`${stop} tuner stopped`);
-      } else if (info) {
-        const s = rows.find((r) => r.kind === info);
-        const help = await invoke<string>("tuner_help", { kind: info });
-        infoDlg(`${s?.friendlyName ?? info} — setup`, help);
-      } else if (log) {
-        openLog(log);
-      } else if (graphs) {
-        openGraphs();
-      } else if (linkKind) {
-        const s = rows.find((r) => r.kind === linkKind);
-        if (s) openLinks(s);
-      }
+      const msg = await invoke<string>("tuner_start", { kind: currentKind });
+      toast(msg);
+      await reload();
     } catch (e) {
       toast(String(e));
     }
   });
-  page.addEventListener("change", async (ev) => {
-    const t = ev.target as HTMLInputElement;
-    const kind = t.getAttribute("data-max");
-    if (!kind) return;
-    const n = parseInt(t.value, 10);
-    if (!Number.isFinite(n)) return;
+  page.querySelector("#tn-stop")!.addEventListener("click", async () => {
+    if (!currentKind) return;
     try {
-      await invoke("tuner_set_max", { kind, max: n });
+      await invoke("tuner_stop", { kind: currentKind });
+      await reload();
+      toast(`${currentKind} tuner stopped`);
+    } catch (e) {
+      toast(String(e));
+    }
+  });
+  page.querySelector("#tn-log-one")!.addEventListener("click", () => openLog(currentKind));
+  page.querySelector("#tn-graphs-one")!.addEventListener("click", () => openGraphs());
+  page.querySelector("#tn-info")!.addEventListener("click", async () => {
+    if (!currentKind) return;
+    try {
+      const s = rows.find((r) => r.kind === currentKind);
+      const help = await invoke<string>("tuner_help", { kind: currentKind });
+      infoDlg(`${s?.friendlyName ?? currentKind} — setup`, help);
+    } catch (e) {
+      toast(String(e));
+    }
+  });
+  page.querySelector("#tn-links")!.addEventListener("click", () => {
+    const s = rows.find((r) => r.kind === currentKind);
+    if (s) openLinks(s);
+  });
+
+  page.querySelector("#tn-save")!.addEventListener("click", async () => {
+    if (!currentKind) return;
+    try {
+      const st = await invoke<AppSettings>("load_settings");
+      const p = profileOf(st, currentKind);
+      p.Kind = currentKind;
+      p.Enabled = (page.querySelector("#tn-on") as HTMLInputElement).checked;
+      p.Running = p.Enabled ? p.Running : false;
+      p.FriendlyName = (page.querySelector("#tn-name") as HTMLInputElement).value.trim() || p.FriendlyName;
+      p.Port = parseInt((page.querySelector("#tn-port") as HTMLInputElement).value, 10) || p.Port;
+      p.TunerCount = parseInt((page.querySelector("#tn-count") as HTMLInputElement).value, 10) || p.TunerCount;
+      p.AllowLan = (page.querySelector("#tn-lan") as HTMLInputElement).checked;
+      if (currentKind === "Jellyfin") {
+        p.DownspiralEnabled = (page.querySelector("#tn-down") as HTMLInputElement).checked;
+      }
+      if (currentKind === "Iptv") {
+        p.RemuxEnabled = (page.querySelector("#tn-remux") as HTMLInputElement).checked;
+        let useMember = (page.querySelector("#tn-epgsrc") as HTMLSelectElement).value === "1";
+        if (useMember && !st.MemberFeedUrl && !st.MemberFeedUrlGz && !st.MemberAccessKey) useMember = false;
+        st.TunerUseMemberEpg = useMember;
+      }
+      await invoke("save_settings", { settings: st });
+      await invoke("tuner_set_max", { kind: currentKind, max: p.TunerCount });
+      settings = st;
+      fillSettingsForm(st, currentKind);
+      toast("Tuner settings saved");
       await reload();
     } catch (e) {
       toast(String(e));
     }
   });
 
+  const saveLineup = async (note?: string) => {
+    const msg = await invoke<string>("save_tuner_lineup", {
+      picks: picks.map((p) => ({ id: p.id, included: p.included, number: p.number ?? null })),
+    });
+    toast(note ?? msg);
+    picks = await invoke<TunerPickRow[]>("lineup_candidates");
+    paintPicks();
+  };
+
+  page.querySelector("#tn-lq")!.addEventListener("input", paintPicks);
+  page.querySelector("#tn-auto")!.addEventListener("click", () => {
+    let targets = picks.filter((p) => p.included);
+    if (targets.length === 0) targets = picks;
+    let n = 1;
+    for (const p of targets) {
+      p.included = true;
+      p.number = n++;
+    }
+    paintPicks();
+    void saveLineup("Lineup auto-populated and saved").catch((e) => toast(String(e)));
+  });
+  page.querySelector("#tn-lsave")!.addEventListener("click", () => {
+    void saveLineup().catch((e) => toast(String(e)));
+  });
+
+  page.querySelector("#tn-disco")!.addEventListener("change", async () => {
+    try {
+      const st = await invoke<AppSettings>("load_settings");
+      st.DiscoveryEnabled = (page.querySelector("#tn-disco") as HTMLInputElement).checked;
+      await invoke("save_settings", { settings: st });
+      toast(st.DiscoveryEnabled ? "Tuner advertise on" : "Tuner advertise off");
+    } catch (e) {
+      toast(String(e));
+    }
+  });
+
+  let poll = 0;
   try {
+    settings = await invoke<AppSettings>("load_settings");
+    (page.querySelector("#tn-disco") as HTMLInputElement).checked = settings.DiscoveryEnabled !== false;
     await reload();
-    window.setInterval(() => void reload().catch(() => undefined), 2000);
+    poll = window.setInterval(() => {
+      if (!page.querySelector("#tn-view-landing")) {
+        window.clearInterval(poll);
+        return;
+      }
+      void reload().catch(() => undefined);
+    }, 2000);
   } catch (e) {
     toast(String(e));
   }
+  return () => {
+    window.clearInterval(poll);
+    if (logTimer) window.clearInterval(logTimer);
+    if (graphTimer) window.clearInterval(graphTimer);
+  };
 }
 
 function esc(s: string): string {

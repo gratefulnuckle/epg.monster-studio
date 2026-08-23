@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Match managed tvg-ids and logos against the epg.monster XMLTV catalog. WinUI: `EpgMatchPage`. Catalog is `<channel>` tvg-ids in that file — not epgshare `.txt`.
+Match managed tvg-ids and logos against the epg.monster XMLTV catalog. Catalog is `<channel>` tvg-ids in that file — not epgshare `.txt`.
 
 ## Requirements
 
@@ -16,7 +16,7 @@ The system SHALL fetch and cache XMLTV from the Settings guide URL(s), default `
 - AND programmes are indexed for now-playing
 
 ### Requirement: Exact and fuzzy match
-The system SHALL classify managed channels as exact-catalog, unknown (id present but not in XML), or empty, and offer fuzzy name suggestions (C# threshold 0.55 for listing; auto-match uses the operator-chosen score).
+The system SHALL classify managed channels as exact-catalog, unknown (id present but not in XML), or empty, and offer fuzzy name suggestions (threshold 0.55 for listing; auto-match uses the operator-chosen score).
 
 #### Scenario: Exact keep
 - GIVEN a managed tvg-id that exists in the catalog
@@ -24,7 +24,7 @@ The system SHALL classify managed channels as exact-catalog, unknown (id present
 - THEN the row is exact and not overwritten by fuzzy
 
 #### Scenario: Dummy ids
-- GIVEN catalog ids named Dummy (or C#’s dummy skip list)
+- GIVEN catalog ids named Dummy (or the dummy skip list)
 - WHEN auto-apply runs
 - THEN those ids are not applied
 
@@ -49,15 +49,20 @@ The system SHALL provide Auto match with a **score level** combo and **per-group
 - AND ambiguous regional collisions are left untouched
 
 ### Requirement: Catalog browse overlay
-The system SHALL open a full-page catalog browser with orange section headers (UK, US, …) and a back action.
+The system SHALL open a dedicated catalog window (`catalog.html`) that reads `epg_catalog` from SQLite (the same table Playlist Editor tvg-id typeahead uses). It SHALL NOT re-parse XMLTV. Opening Browse catalog SHALL show a loading bar, then virtualized rows (empty filter = first page). Typing in Filter SHALL search `tvg-id` and name.
 
 #### Scenario: Section headers
 - GIVEN the catalog has `section` values
 - WHEN browse is open
 - THEN section header rows use issue-orange styling `#FF6D00`
 
+#### Scenario: Browse loads a list
+- GIVEN `epg_catalog` has rows
+- WHEN the operator clicks Browse catalog
+- THEN the catalog window shows channel rows without requiring a search first
+
 ### Requirement: Search images
-The system SHALL offer **Search images** (Google transparent image search) for the current channel, matching the WinUI control.
+The system SHALL offer **Search images** (Google transparent image search) for the current channel.
 
 #### Scenario: Google transparent search
 - GIVEN a selected channel with a name

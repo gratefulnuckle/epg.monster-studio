@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Persist every `AppSettings` field with the same tiles, labels, and defaults as WinUI `SettingsPage.xaml`.
+Persist every `AppSettings` field with the Settings tiles, labels, and defaults.
 
 ## Requirements
 
@@ -59,12 +59,12 @@ The system SHALL show **Engine** `ffmpeg` | `VLC` (default ffmpeg), **ffmpeg pro
 - THEN Engine is ffmpeg and profile is `Plex MPEG2 + AC3 (recommended)`
 
 ### Requirement: Logos tile
-The system SHALL show **Logo save directory** placeholder `%LocalAppData%\epg.monster-studio\logo`, `Host the logos folder on the tuner`, `Use local logos in tuner playlists and EPG`.
+The system SHALL show **Logo save directory** placeholder `{app}/data/logo`, `Host the logos folder on the tuner`, `Use local logos in tuner playlists and EPG`.
 
 #### Scenario: Logo path placeholder
 - GIVEN Settings is open
 - WHEN the Logos tile renders
-- THEN the save-directory placeholder is `%LocalAppData%\epg.monster-studio\logo`
+- THEN the save-directory placeholder is `{app}/data/logo`
 
 ### Requirement: Weekly Stream Audit tile
 The system SHALL show Monday–Sunday group text boxes (Sunday spanning two columns), checkbox `Remind me when today's groups have not run (does not start a probe)`, and `Fail fully black screens (ffmpeg blackdetect)`.
@@ -76,7 +76,7 @@ The system SHALL show Monday–Sunday group text boxes (Sunday spanning two colu
 - AND the reminder checkbox does not start a probe
 
 ### Requirement: Screen matches tile
-The system SHALL list slate stills and buttons `Add screen…`, `Remove selected`, `Open folder` for `%LocalAppData%\epg.monster-studio\offline-slates\`.
+The system SHALL list slate stills and buttons `Add screen…`, `Remove selected`, `Open folder` for `{app}/data/offline-slates/`.
 
 #### Scenario: Slate folder
 - GIVEN Settings is open
@@ -84,18 +84,19 @@ The system SHALL list slate stills and buttons `Add screen…`, `Remove selected
 - THEN the offline-slates directory under local app data is opened
 
 ### Requirement: Diagnostics tile
-The system SHALL show `Open logs folder`, `Open crash reports`, the log path, and **Optional Python path** placeholder `python.exe`.
+The system SHALL show `Open logs folder`, `Open crash reports`, the log path, checkbox **Check for app updates on splash**, and **Optional Python path** placeholder `python.exe`. GitHub release compare lives on the **Check For Updates** nav page, not this tile.
 
 #### Scenario: Diagnostics buttons
 - GIVEN Settings is open
 - WHEN Diagnostics renders
 - THEN `Open logs folder` and `Open crash reports` are present
 - AND the Python path placeholder is `python.exe`
+- AND there is no **Update epg.monster studio** button on this tile
 
 ### Requirement: Detect and Save
-The system SHALL **Detect bundled tools** (fill mpv/ffmpeg/ffprobe from `tools/` next to the exe) and **Save** persist all tiles to the same settings keys the C# app uses.
+The system SHALL **Detect bundled tools** (fill mpv/ffmpeg/ffprobe from `tools/` next to the exe) and **Save** persist all tiles to the PascalCase `AppSettings` keys.
 
-#### Scenario: Round-trip with C# DB
-- GIVEN a settings blob written by the C# app
-- WHEN this remake loads Settings
+#### Scenario: Round-trip settings JSON
+- GIVEN a settings blob with stored tuner device ids
+- WHEN Settings loads
 - THEN every field shows the stored value (including tuner device ids)

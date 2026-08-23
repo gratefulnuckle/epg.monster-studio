@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com",
+      "signCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File ./windows/sign.ps1 %1"
+    }
+  }
+}

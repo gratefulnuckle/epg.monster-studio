@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Application chrome: splash, main window, navigation, title-bar search, toasts, tray, About, and crash reporting. Matches WinUI `MainWindow.xaml`, `SplashWindow.xaml`, `TrayIconService`, `AboutDialog`, and `CrashGuard`.
+Application chrome: splash, main window, navigation, title-bar search, toasts, tray, About, and crash reporting.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ The system SHALL show a splash window on `#0C0C10` with the brand logo, version 
 - THEN it lists tool/EPG checks (ffmpeg, ffprobe, mpv, XMLTV)
 - AND XMLTV progress is shown as a percentage
 - AND the log line style is `XMLTV begin epg.monster (1/1)` then programme/channel counts
-- AND the splash remains at least 5 seconds (C# minimum)
+- AND the splash remains at least 5 seconds
 
 #### Scenario: Catalog is epg.monster only
 - GIVEN splash fetch
@@ -33,7 +33,7 @@ The system SHALL show a splash window on `#0C0C10` with the brand logo, version 
 - AND epgshare `.txt` catalogs are not fetched
 
 ### Requirement: Navigation items and order
-The system SHALL provide a left pane 220px wide with a clickable logo (About) and these items in this order: Add Sources, Playlist Editor, EPG Audit, Logo Audit, Stream Audit, Managed Output, TV Tuner; footer: Settings.
+The system SHALL provide a left pane 220px wide with a clickable logo (About) and these items in this order: Add Sources, Playlist Editor, EPG Audit, Logo Audit, Stream Audit, Managed Output, TV Tuner; footer: **Check For Updates**, then Settings. IPTV Player (G-houl) is v3.
 
 #### Scenario: Default page
 - GIVEN a fresh session
@@ -43,14 +43,23 @@ The system SHALL provide a left pane 220px wide with a clickable logo (About) an
 #### Scenario: Logo opens About
 - GIVEN the main window
 - WHEN the operator clicks the nav logo
-- THEN the About dialog opens (license GNU GPL v3.0, version, links)
+- THEN the About dialog opens (license GNU GPL v3.0, 2026 edition, version, links)
 - AND the tooltip is `About epg.monster studio`
+
+### Requirement: Check For Updates
+The system SHALL show **Check For Updates** in the nav footer above Settings. Opening it queries GitHub Releases for this repo and reports current vs latest without crashing if the repo is private or has no release yet.
+
+#### Scenario: Check on open
+- GIVEN the operator opens Check For Updates
+- WHEN the page mounts
+- THEN it shows this build (2026 edition + semver) and the latest GitHub tag, or a status line if GitHub is unreachable / has no release
+- AND **Open GitHub release** opens the latest release URL in the browser
 
 ### Requirement: Title-bar search scope
 The system SHALL show a 320px search box with placeholder `Search name, group, tvg-id, URL…` on Add Sources, Playlist Editor, and Managed Output only.
 
 #### Scenario: Hidden on other pages
-- GIVEN the operator is on EPG Audit, Logo Audit, Stream Audit, TV Tuner, or Settings
+- GIVEN the operator is on EPG Audit, Logo Audit, Stream Audit, TV Tuner, Check For Updates, or Settings
 - WHEN the page is shown
 - THEN the title-bar search box does not filter that page (EPG may keep its own in-page filter)
 
@@ -73,7 +82,7 @@ The system SHALL hide the window to a tray icon on minimize so Stream Audit and 
 - AND the daily log records a tray hide (not a crash)
 
 ### Requirement: Crash report on next launch
-The system SHALL write a crash report under `%LocalAppData%\epg.monster-studio\` and, on the next launch, show a crash report window before the main UI.
+The system SHALL write a crash report under `{launch}/data/logs/crashes/` and, on the next launch, show a crash report window before the main UI.
 
 #### Scenario: Pending crash
 - GIVEN `pending-crash.txt` exists
@@ -83,7 +92,7 @@ The system SHALL write a crash report under `%LocalAppData%\epg.monster-studio\`
 - AND the operator can submit via members issues API or dismiss
 
 ### Requirement: Daily log and heartbeat
-The system SHALL write `%LocalAppData%\epg.monster-studio\logs\epg.monster-studio-YYYY-MM-DD.log` and emit a `[Watch] heartbeat` line every 5 seconds while running.
+The system SHALL write `{launch}/data/logs/YYYY-MM-DD.log` and emit a `[Watch] heartbeat` line every 5 seconds while running.
 
 #### Scenario: Heartbeat while visible
 - GIVEN the main window is open

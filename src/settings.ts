@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { applyPlayerEngineValue, loadStudioCaps, playerEngineOptionsHtml } from "./capabilities";
 
-type TunerProfile = {
+export type TunerProfile = {
   Kind: string;
   Enabled: boolean;
   Running: boolean;
@@ -14,7 +15,7 @@ type TunerProfile = {
   DownspiralEnabled: boolean;
 };
 
-type AppSettings = {
+export type AppSettings = {
   DefaultPlayer: number;
   MpvPath: string;
   VlcPath: string;
@@ -45,6 +46,7 @@ type AppSettings = {
   LogoSaveDirectory: string;
   HostLogosOnTuner: boolean;
   UseLocalLogos: boolean;
+  CacheLogos?: boolean;
   MemberEmail: string;
   MemberUsername: string;
   MemberAccessKey: string;
@@ -87,9 +89,9 @@ export function settingsHtml(): string {
     <div class="settings-grid">
       <section class="tile">
         <h2>Players</h2>
-        <p class="hint">External player used from Playlist Editor and Stream.</p>
+        <p class="hint">Play uses mpv or VLC from the paths below. Set those paths if Play does not find a player.</p>
         <div class="field"><label>Default player</label>
-          <select id="set-player"><option value="0">mpv</option><option value="1">VLC</option></select></div>
+          <select id="set-player">${playerEngineOptionsHtml()}</select></div>
         <div class="field"><label id="lbl-mpv">mpv.exe path</label><input id="set-mpv" /></div>
         <div class="field"><label id="lbl-vlc">vlc.exe path</label><input id="set-vlc" /></div>
       </section>
@@ -124,17 +126,6 @@ export function settingsHtml(): string {
         <p class="page-sub" id="set-member-feed" style="user-select:text"></p>
         <p class="page-sub" id="set-member-pub"></p>
       </section>
-      <section class="tile" style="grid-column:1/-1">
-        <h2>TV Tuner</h2>
-        <p class="hint">IPTV is on for new installs. Plex, Jellyfin, and Emby stay off until you enable them. Ports 8080–8083. Start/stop is on the TV Tuner panel.</p>
-        <div class="settings-grid">
-          ${tunerCardHtml("plex", "Plex")}
-          ${tunerCardHtml("jelly", "Jellyfin", true)}
-          ${tunerCardHtml("emby", "Emby")}
-          ${tunerCardHtml("iptv", "IPTV (TiviMate / Smarters)", false, true)}
-        </div>
-        <label class="check"><input type="checkbox" id="set-disco" /> Advertise tuners on the network (HDHomeRun UDP 65001 + SSDP). Turn on Allow LAN if Plex is another PC.</label>
-      </section>
       <section class="tile">
         <h2>Remux</h2>
         <p class="hint">Spawn ffmpeg or VLC, buffer MPEG-TS, then serve Plex. MPEG2+AC3 is the Plex-safe default. VLC is always copy-to-TS.</p>
@@ -149,8 +140,8 @@ export function settingsHtml(): string {
       </section>
       <section class="tile">
         <h2>Logos</h2>
-        <p class="hint">Local PNG pack and optional hosting on the tuner.</p>
-        <div class="field"><label>Logo save directory</label><input id="set-logodir" placeholder="%LocalAppData%\\epg.monster-studio\\logo" /></div>
+        <p class="hint">Download logos from Logo Audit → Save Logos into this folder. Existing files are skipped unless the download is a different size. Optional hosting on the tuner uses the same pack.</p>
+        <div class="field"><label>Logo save directory</label><input id="set-logodir" placeholder="{app}/data/logo" /></div>
         <label class="check"><input type="checkbox" id="set-hostlogos" /> Host the logos folder on the tuner</label>
         <label class="check"><input type="checkbox" id="set-locallogos" /> Use local logos in tuner playlists and EPG</label>
       </section>
@@ -180,40 +171,16 @@ export function settingsHtml(): string {
         </div>
         <p class="page-sub" id="set-slate-status"></p>
         <h2 style="margin-top:16px">Diagnostics</h2>
-        <p class="hint">Daily logs and crash reports live under local app data. A crash opens a report on the next launch.</p>
+        <p class="hint">Daily logs and crash reports live under local app data. A crash opens a report on the next launch. GitHub releases: nav → Check For Updates.</p>
         <div>
           <button id="set-logs">Open logs folder</button>
           <button id="set-crashes">Open crash reports</button>
-          <button id="set-update">Update epg.monster studio</button>
         </div>
         <p class="page-sub" id="set-logpath"></p>
-        <p class="page-sub" id="set-update-status"></p>
-        <label class="check"><input type="checkbox" id="set-updates" /> Check for app updates</label>
+        <label class="check"><input type="checkbox" id="set-updates" /> Check for app updates on splash</label>
         <div class="field"><label>Optional Python path</label><input id="set-py" placeholder="python.exe" /></div>
       </section>
     </div>
-  `;
-}
-
-function tunerCardHtml(id: string, title: string, downspiral = false, iptv = false): string {
-  return `
-    <section class="tile">
-      <label class="check"><input type="checkbox" id="${id}-on" /> ${title}</label>
-      <div class="field"><label>Friendly name</label><input id="${id}-name" /></div>
-      <div class="field"><label>Port</label><input id="${id}-port" type="number" /></div>
-      <div class="field"><label>Tuner count</label><input id="${id}-count" type="number" /></div>
-      <label class="check"><input type="checkbox" id="${id}-lan" /> Allow LAN</label>
-      ${downspiral ? `<label class="check"><input type="checkbox" id="${id}-down" /> Downspiral — one playlist + guide per group (switch lists without changing Jellyfin profiles)</label>` : ""}
-      ${iptv ? `
-        <label class="check"><input type="checkbox" id="${id}-remux" /> Remux IPTV playlist through Studio (MPEG-TS)</label>
-        <div class="field"><label>Tuner EPG for IPTV players</label>
-          <select id="set-epgsrc">
-            <option value="0">Local Studio guide (/guide.xml)</option>
-            <option value="1">my.epg.monster curated feed</option>
-          </select></div>
-        <p class="page-sub" id="set-epghint"></p>` : ""}
-      <p class="page-sub" id="${id}-urls" style="user-select:text"></p>
-    </section>
   `;
 }
 
@@ -244,54 +211,6 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
     if (st.MemberLastPublishedAt) parts.push("Last upload: " + st.MemberLastPublishedAt);
     return parts.join("  ·  ");
   };
-  const tunerHelp = (p: TunerProfile, st: AppSettings) => {
-    const root = `http://${p.AllowLan && (p.BindAddress === "0.0.0.0" || p.BindAddress === "*" || p.BindAddress === "+") ? "127.0.0.1" : p.BindAddress || "127.0.0.1"}:${p.Port}`;
-    const epg = st.TunerUseMemberEpg && (st.MemberFeedUrlGz || st.MemberFeedUrl)
-      ? (st.MemberFeedUrlGz || st.MemberFeedUrl)
-      : `${root}/guide.xml`;
-    const lines = [`Device ID: ${p.DeviceId} (stable)`, `Tuner: ${root}`, `EPG: ${epg}`];
-    if (st.HostLogosOnTuner || st.UseLocalLogos) lines.push(`Logos: ${root}/logos/{tvg-id}.png`);
-    if (p.Kind === "Jellyfin" || p.Kind === "Iptv") {
-      lines.push(`Playlist: ${root}/playlist.m3u8`);
-      lines.push(`M3U: ${root}/tuner.m3u`);
-    }
-    if (p.Kind === "Jellyfin" && p.DownspiralEnabled) {
-      lines.push(`Downspiral index: ${root}/downspiral/index.json`);
-      lines.push(`Per-group: ${root}/downspiral/{group}.m3u8 + .xml`);
-    }
-    if (!p.Enabled) lines.push("Disabled — turn on to start this tuner.");
-    return lines.join("\n");
-  };
-
-  const paintTunerUrls = () => {
-    if (!s) return;
-    $("plex-urls").textContent = tunerHelp(s.PlexTuner, s);
-    $("jelly-urls").textContent = tunerHelp(s.JellyfinTuner, s);
-    $("emby-urls").textContent = tunerHelp(s.EmbyTuner, s);
-    $("iptv-urls").textContent = tunerHelp(s.IptvTuner, s);
-  };
-
-  const loadTuner = (id: string, p: TunerProfile) => {
-    setChk(`${id}-on`, p.Enabled);
-    setVal(`${id}-name`, p.FriendlyName);
-    setVal(`${id}-port`, String(p.Port));
-    setVal(`${id}-count`, String(p.TunerCount));
-    setChk(`${id}-lan`, p.AllowLan);
-  };
-  const readTuner = (id: string, existing: TunerProfile, kind: string): TunerProfile => {
-    const enabled = chk(`${id}-on`);
-    return {
-      ...existing,
-      Kind: kind,
-      Enabled: enabled,
-      Running: enabled ? existing.Running : false,
-      FriendlyName: val(`${id}-name`).trim() || existing.FriendlyName,
-      Port: parseInt(val(`${id}-port`), 10) || existing.Port,
-      TunerCount: parseInt(val(`${id}-count`), 10) || existing.TunerCount,
-      AllowLan: chk(`${id}-lan`),
-    };
-  };
-
   const parseWeek = (json: string): Record<string, string[]> => {
     const empty: Record<string, string[]> = {};
     for (const d of DAYS) empty[d] = [];
@@ -361,13 +280,7 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
       Saturday: splitGroups(val("set-sat")),
       Sunday: splitGroups(val("set-sun")),
     };
-    const jelly = readTuner("jelly", s.JellyfinTuner, "Jellyfin");
-    jelly.DownspiralEnabled = chk("jelly-down");
-    const iptv = readTuner("iptv", s.IptvTuner, "Iptv");
-    iptv.RemuxEnabled = chk("iptv-remux");
     const key = val("set-key").trim() || s.MemberAccessKey;
-    let useMember = (page.querySelector("#set-epgsrc") as HTMLSelectElement).value === "1";
-    if (useMember && !s.MemberFeedUrl && !s.MemberFeedUrlGz && !key) useMember = false;
     return {
       ...s,
       DefaultPlayer: parseInt((page.querySelector("#set-player") as HTMLSelectElement).value, 10) || 0,
@@ -384,15 +297,9 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
       EpgXmlUrl: xmlLines[0] ?? "https://epg.monster/epg.xml",
       EpgXmlUrls: xmlLines,
       PythonPath: val("set-py").trim() || null,
-      PlexTuner: readTuner("plex", s.PlexTuner, "Plex"),
-      JellyfinTuner: jelly,
-      EmbyTuner: readTuner("emby", s.EmbyTuner, "Emby"),
-      IptvTuner: iptv,
       MemberEmail: val("set-email").trim(),
       MemberAccessKey: key,
       MemberApiBase: val("set-api").trim() || "https://epg.monster",
-      TunerUseMemberEpg: useMember,
-      DiscoveryEnabled: chk("set-disco"),
       WeeklyAuditJson: JSON.stringify(week),
       WeeklyAuditAutoRun: chk("set-weekauto"),
       BlackDetectEnabled: chk("set-black"),
@@ -407,7 +314,10 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
   };
 
   const fill = (st: AppSettings) => {
-    (page.querySelector("#set-player") as HTMLSelectElement).value = String(st.DefaultPlayer ?? 0);
+    applyPlayerEngineValue(
+      page.querySelector("#set-player") as HTMLSelectElement,
+      st.DefaultPlayer ?? 2,
+    );
     setVal("set-mpv", st.MpvPath ?? "");
     setVal("set-vlc", st.VlcPath ?? "");
     setVal("set-ffmpeg", st.FfmpegPath ?? "");
@@ -426,13 +336,6 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
     $("set-member-feed").textContent = feedLabel(st.MemberFeedUrl, st.MemberFeedUrlGz);
     $("set-member-pub").textContent = publishLabel(st);
     ($("set-upload") as HTMLButtonElement).disabled = !st.MemberAccessKey;
-    loadTuner("plex", st.PlexTuner);
-    loadTuner("jelly", st.JellyfinTuner);
-    loadTuner("emby", st.EmbyTuner);
-    loadTuner("iptv", st.IptvTuner);
-    setChk("jelly-down", !!st.JellyfinTuner.DownspiralEnabled);
-    setChk("iptv-remux", st.IptvTuner.RemuxEnabled !== false);
-    setChk("set-disco", st.DiscoveryEnabled !== false);
     (page.querySelector("#set-reng") as HTMLSelectElement).value = st.RemuxEngine === "vlc" ? "vlc" : "ffmpeg";
     (page.querySelector("#set-rprof") as HTMLSelectElement).value =
       st.RemuxProfile === "copy_aac" ? "copy_aac" : "mpeg2_ac3";
@@ -451,26 +354,15 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
     setVal("set-logodir", st.LogoSaveDirectory || folders.logoDir);
     setChk("set-hostlogos", !!st.HostLogosOnTuner);
     setChk("set-locallogos", !!st.UseLocalLogos);
-    const hasFeed = !!(st.MemberFeedUrlGz || st.MemberFeedUrl);
-    (page.querySelector("#set-epgsrc") as HTMLSelectElement).value = st.TunerUseMemberEpg && hasFeed ? "1" : "0";
-    $("set-epghint").textContent = hasFeed
-      ? "Curated feed: " + (st.MemberFeedUrlGz || st.MemberFeedUrl)
-      : "Upload channels.json first to use the my.epg.monster feed as tuner EPG.";
     setVal("set-py", st.PythonPath ?? "");
-    paintTunerUrls();
   };
 
   page.querySelector("#save-settings")!.addEventListener("click", async () => {
     try {
       const next = collect();
-      if (next.TunerUseMemberEpg && !next.MemberFeedUrl && !next.MemberFeedUrlGz) {
-        next.TunerUseMemberEpg = false;
-        (page.querySelector("#set-epgsrc") as HTMLSelectElement).value = "0";
-        $("set-epghint").textContent = "Upload channels.json first to use the my.epg.monster feed as tuner EPG.";
-      }
       await invoke("save_settings", { settings: next });
+      await loadStudioCaps();
       s = next;
-      paintTunerUrls();
       ($("set-upload") as HTMLButtonElement).disabled = !next.MemberAccessKey;
       if (next.MemberAccessKey) {
         $("set-status").textContent = "Saved. Checking access key…";
@@ -496,18 +388,29 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
   });
 
   page.querySelector("#detect-tools")!.addEventListener("click", async () => {
-    const p = await invoke<{ mpv: string; vlc: string; ffmpeg: string; ffprobe: string }>("detect_tool_paths");
-    setVal("set-mpv", p.mpv);
-    setVal("set-vlc", p.vlc);
-    setVal("set-ffmpeg", p.ffmpeg);
-    setVal("set-ffprobe", p.ffprobe);
-    $("set-status").textContent = "Detected bundled / common install paths.";
+    try {
+      const p = await invoke<{ mpv: string; vlc: string; ffmpeg: string; ffprobe: string }>("detect_tool_paths");
+      setVal("set-mpv", p.mpv);
+      setVal("set-vlc", p.vlc);
+      setVal("set-ffmpeg", p.ffmpeg);
+      setVal("set-ffprobe", p.ffprobe);
+      $("set-status").textContent = "Detected bundled / common install paths. Save to apply.";
+    } catch (e) {
+      toast(String(e));
+    }
   });
 
   page.querySelector("#set-test")!.addEventListener("click", async () => {
     const key = val("set-key").trim() || s?.MemberAccessKey || "";
     $("set-member-status").textContent = "Testing…";
-    const ping = await invoke<Ping>("members_ping", { apiBase: val("set-api"), accessKey: key });
+    let ping: Ping;
+    try {
+      ping = await invoke<Ping>("members_ping", { apiBase: val("set-api"), accessKey: key });
+    } catch (e) {
+      $("set-member-status").textContent = String(e);
+      toast(String(e));
+      return;
+    }
     $("set-member-status").textContent = ping.message;
     if (ping.ok) {
       if (ping.email && !val("set-email").trim()) setVal("set-email", ping.email);
@@ -560,46 +463,6 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
   page.querySelector("#set-slate-open")!.addEventListener("click", () => void invoke("open_folder", { path: folders.slates }));
   page.querySelector("#set-logs")!.addEventListener("click", () => void invoke("open_folder", { path: folders.logs }));
   page.querySelector("#set-crashes")!.addEventListener("click", () => void invoke("open_folder", { path: folders.crashes }));
-  page.querySelector("#set-update")!.addEventListener("click", async () => {
-    const status = $("set-update-status");
-    status.textContent = "Checking GitHub for updates…";
-    $("set-status").textContent = "Checking GitHub for updates…";
-    try {
-      const r = await invoke<{
-        current: string;
-        displayVersion: string;
-        latest?: string | null;
-        updateAvailable: boolean;
-        releaseUrl: string;
-        notes?: string | null;
-        error?: string | null;
-      }>("check_studio_update");
-      if (r.error) {
-        status.textContent = r.error;
-        $("set-status").textContent = r.error;
-        toast(r.error);
-        return;
-      }
-      if (!r.updateAvailable) {
-        const latest = r.latest || r.current;
-        const msg = `Already current (${r.displayVersion}). Latest on GitHub: ${latest}.`;
-        status.textContent = msg;
-        $("set-status").textContent = msg;
-        toast("Already current");
-        return;
-      }
-      const msg = `Update ${r.latest} is available. Opening the GitHub release…`;
-      status.textContent = msg;
-      $("set-status").textContent = msg;
-      await invoke("open_latest_release");
-      toast(`Update ${r.latest} — GitHub release opened`);
-    } catch (e) {
-      const msg = String(e);
-      status.textContent = msg;
-      $("set-status").textContent = msg;
-      toast(msg);
-    }
-  });
 
   try {
     const host = await invoke<{ os: string; exeSuffix: string }>("host_info");

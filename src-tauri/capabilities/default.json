@@ -2,11 +2,12 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities",
-  "windows": ["main"],
+  "windows": ["main", "epg-catalog"],
   "permissions": [
     "core:default",
     "core:window:allow-hide",
     "core:window:allow-show",
+    "core:window:allow-close",
     "core:window:allow-set-focus",
     "core:window:allow-unminimize",
     "core:window:allow-is-visible",
@@ -14,6 +15,7 @@
     "core:window:allow-is-maximized",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
+    "core:window:allow-set-fullscreen",
     "core:window:allow-start-dragging",
     "dialog:default",
     "opener:default"

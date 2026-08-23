@@ -7,19 +7,60 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::paths::app_data_directory;
+use crate::tools::find_on_path;
 use crate::USER_AGENT;
 
 const MANIFEST_JSON: &str = include_str!("../resources/tools-manifest.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ToolTarget {
+    pub host: String,
+    #[serde(default = "download_source")]
+    pub source: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub sha256: String,
+    #[serde(default)]
+    pub exe_names: Vec<String>,
+    #[serde(default)]
+    pub dest_subdir: String,
+    #[serde(default)]
+    pub install_hint: String,
+    #[serde(default)]
+    pub archive: String,
+    #[serde(default)]
+    pub optional: bool,
+}
+
+fn download_source() -> String {
+    "download".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolSpec {
     pub id: String,
     pub label: String,
+    #[serde(default)]
     pub url: String,
+    #[serde(default)]
     pub sha256: String,
+    #[serde(default)]
     pub exe_names: Vec<String>,
+    #[serde(default)]
     pub dest_subdir: String,
+    #[serde(default)]
+    pub targets: Vec<ToolTarget>,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub install_hint: String,
+    #[serde(default)]
+    pub archive: String,
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,37 +90,170 @@ pub fn load_manifest() -> Result<ToolsManifest, String> {
     parse_manifest(MANIFEST_JSON)
 }
 
+pub fn current_host() -> String {
+    let os = if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        std::env::consts::ARCH
+    };
+    format!("{os}-{arch}")
+}
+
+pub fn resolve_tool(spec: &ToolSpec, host: &str) -> Option<ToolSpec> {
+    if let Some(t) = spec.targets.iter().find(|t| t.host == host) {
+        return Some(flatten_target(spec, t));
+    }
+    // Legacy unflattened pin: Windows zip only. Never feed a gyan/mpv Windows
+    // archive to Linux or macOS.
+    if spec.targets.is_empty() && !spec.url.trim().is_empty() && host.starts_with("windows-") {
+        let mut out = spec.clone();
+        out.source = if out.source.trim().is_empty() {
+            "download".into()
+        } else {
+            out.source
+        };
+        return Some(out);
+    }
+    None
+}
+
+fn flatten_target(spec: &ToolSpec, t: &ToolTarget) -> ToolSpec {
+    ToolSpec {
+        id: spec.id.clone(),
+        label: spec.label.clone(),
+        url: if t.url.trim().is_empty() {
+            spec.url.clone()
+        } else {
+            t.url.clone()
+        },
+        sha256: if t.sha256.trim().is_empty() {
+            spec.sha256.clone()
+        } else {
+            t.sha256.clone()
+        },
+        exe_names: if t.exe_names.is_empty() {
+            spec.exe_names.clone()
+        } else {
+            t.exe_names.clone()
+        },
+        dest_subdir: if t.dest_subdir.trim().is_empty() {
+            spec.dest_subdir.clone()
+        } else {
+            t.dest_subdir.clone()
+        },
+        targets: Vec::new(),
+        source: if t.source.trim().is_empty() {
+            "download".into()
+        } else {
+            t.source.clone()
+        },
+        install_hint: t.install_hint.clone(),
+        archive: if t.archive.trim().is_empty() {
+            spec.archive.clone()
+        } else {
+            t.archive.clone()
+        },
+        optional: t.optional || spec.optional,
+    }
+}
+
 pub fn find_app_root(hint: &Path) -> PathBuf {
     let mut p = hint.to_path_buf();
+    let mut tools_hit = None;
     for _ in 0..8 {
         if p.join("src-tauri").is_dir() && p.join("package.json").is_file() {
             return p;
         }
-        if p.join("tools").join("ffmpeg").is_dir() || p.join("tools").join("mpv").is_dir() {
-            return p;
+        let ffmpeg_exe = p
+            .join("tools")
+            .join("ffmpeg")
+            .join(crate::tools::tool_file_name("ffmpeg"));
+        let mpv_exe = p
+            .join("tools")
+            .join("mpv")
+            .join(crate::tools::tool_file_name("mpv"));
+        if tools_hit.is_none() && (ffmpeg_exe.is_file() || mpv_exe.is_file()) {
+            tools_hit = Some(p.clone());
         }
         if !p.pop() {
             break;
         }
     }
-    hint.to_path_buf()
+    tools_hit.unwrap_or_else(|| hint.to_path_buf())
 }
 
 pub fn tools_root(app_root: &Path) -> PathBuf {
     app_root.join("tools")
 }
 
-pub fn tool_present(app_root: &Path, spec: &ToolSpec) -> bool {
+fn dest_dir(app_root: &Path, spec: &ToolSpec) -> PathBuf {
+    let sub = if spec.dest_subdir.trim().is_empty() {
+        spec.id.as_str()
+    } else {
+        spec.dest_subdir.as_str()
+    };
+    tools_root(app_root).join(sub)
+}
+
+fn bundled_present(app_root: &Path, spec: &ToolSpec) -> bool {
     if spec.exe_names.is_empty() {
         return false;
     }
-    let dest = tools_root(app_root).join(&spec.dest_subdir);
-    spec.exe_names.iter().all(|n| dest.join(n).is_file())
+    let dest = dest_dir(app_root, spec);
+    spec.exe_names.iter().all(|n| {
+        dest.join(n).is_file() || dest.join("bin").join(n).is_file()
+    })
+}
+
+fn system_present(spec: &ToolSpec) -> bool {
+    if spec.exe_names.is_empty() {
+        return false;
+    }
+    spec.exe_names.iter().all(|n| find_on_path(n).is_some())
+}
+
+pub fn is_system_source(spec: &ToolSpec) -> bool {
+    spec.source.eq_ignore_ascii_case("system")
+}
+
+pub fn tool_present(app_root: &Path, spec: &ToolSpec) -> bool {
+    if bundled_present(app_root, spec) {
+        return true;
+    }
+    if is_system_source(spec) {
+        return system_present(spec);
+    }
+    false
 }
 
 pub fn missing_tools(app_root: &Path) -> Result<Vec<ToolSpec>, String> {
     let man = load_manifest()?;
-    Ok(man.tools.into_iter().filter(|t| !tool_present(app_root, t)).collect())
+    let host = current_host();
+    let mut out = Vec::new();
+    for spec in man.tools {
+        let resolved = resolve_tool(&spec, &host).ok_or_else(|| {
+            format!(
+                "No {} pin for {host}. Install ffmpeg and mpv, or add a host target in tools-manifest.json.",
+                spec.id
+            )
+        })?;
+        if resolved.optional {
+            continue;
+        }
+        if !tool_present(app_root, &resolved) {
+            out.push(resolved);
+        }
+    }
+    Ok(out)
 }
 
 pub fn hash_file(path: &Path) -> Result<String, String> {
@@ -94,6 +268,34 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
         hasher.update(&buf[..n]);
     }
     Ok(format!("{:X}", hasher.finalize()))
+}
+
+pub fn extract_zip_tree(zip_path: &Path, dest_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
+    let file = fs::File::open(zip_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().replace('\\', "/");
+        if name.contains("..") {
+            continue;
+        }
+        let rel = name.trim_start_matches('/');
+        if rel.is_empty() {
+            continue;
+        }
+        let out = dest_dir.join(rel);
+        if entry.is_dir() || name.ends_with('/') {
+            fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut dest = fs::File::create(&out).map_err(|e| e.to_string())?;
+        std::io::copy(&mut entry, &mut dest).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 pub fn extract_exes(zip_path: &Path, dest_dir: &Path, exe_names: &[String]) -> Result<(), String> {
@@ -130,6 +332,25 @@ where
     if missing.is_empty() {
         return Ok(());
     }
+
+    let system: Vec<&ToolSpec> = missing
+        .iter()
+        .filter(|t| is_system_source(t) || t.url.trim().is_empty())
+        .collect();
+    if !system.is_empty() {
+        let hints: Vec<String> = system
+            .iter()
+            .map(|t| {
+                if t.install_hint.trim().is_empty() {
+                    format!("Install {} and put it on PATH.", t.label)
+                } else {
+                    t.install_hint.clone()
+                }
+            })
+            .collect();
+        return Err(hints.join(" "));
+    }
+
     let cache = app_data_directory().join("tool-cache");
     fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
     let total = missing.len() as f64;
@@ -137,23 +358,26 @@ where
         if spec.sha256.trim().is_empty() || spec.sha256.eq_ignore_ascii_case("PENDING") {
             return Err(format!("No SHA-256 pinned for {}.", spec.id));
         }
-        let zip_path = cache.join(format!("{}.zip", spec.id));
+        if !spec.url.starts_with("https://") {
+            return Err(format!("Refusing non-HTTPS tool URL for {}.", spec.id));
+        }
+        let pack_path = cache.join(format!("{}.zip", spec.id));
         progress(ToolBootstrapProgress {
             tool_id: spec.id.clone(),
             message: format!("Downloading {}…", spec.label),
             percent: (i as f64 / total) * 100.0,
         });
-        download(&spec.url, &zip_path, &spec.id, i, missing.len(), &mut progress)?;
-        let actual = hash_file(&zip_path)?;
+        download(&spec.url, &pack_path, &spec.id, i, missing.len(), &mut progress)?;
+        let actual = hash_file(&pack_path)?;
         if !actual.eq_ignore_ascii_case(&spec.sha256) {
-            let _ = fs::remove_file(&zip_path);
+            let _ = fs::remove_file(&pack_path);
             return Err(format!(
                 "SHA-256 mismatch for {}. Expected {}, got {}.",
                 spec.id, spec.sha256, actual
             ));
         }
-        let dest = tools_root(app_root).join(&spec.dest_subdir);
-        extract_exes(&zip_path, &dest, &spec.exe_names)?;
+        let dest = dest_dir(app_root, spec);
+        extract_exes(&pack_path, &dest, &spec.exe_names)?;
         progress(ToolBootstrapProgress {
             tool_id: spec.id.clone(),
             message: format!("{} ready", spec.label),
@@ -176,7 +400,7 @@ where
 {
     let resp = ureq::get(url)
         .set("User-Agent", USER_AGENT)
-        .timeout(std::time::Duration::from_secs(15 * 60))
+        .timeout(std::time::Duration::from_secs(60 * 60))
         .call()
         .map_err(|e| e.to_string())?;
     let total_bytes = resp
@@ -233,17 +457,99 @@ mod tests {
         assert_eq!(man.tools.len(), 1);
         assert_eq!(man.tools[0].id, "ffmpeg");
         assert!(man.tools[0].exe_names.iter().any(|n| n == "ffprobe.exe"));
+        let win = resolve_tool(&man.tools[0], "windows-x86_64").unwrap();
+        assert_eq!(win.source, "download");
+        assert!(resolve_tool(&man.tools[0], "linux-x86_64").is_none());
+    }
+
+    #[test]
+    fn find_app_root_prefers_package_json_over_tools_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join("src-tauri")).unwrap();
+        std::fs::write(project.join("package.json"), b"{}").unwrap();
+        let nested = project.join("src-tauri").join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(find_app_root(&nested), project);
     }
 
     #[test]
     fn load_manifest_is_embedded() {
         let man = load_manifest().unwrap();
         assert!(man.tools.iter().any(|t| t.id == "ffmpeg"));
-        assert!(man.tools.iter().any(|t| t.id == "mpv"));
-        assert!(man.tools.iter().all(|t| t.url.starts_with("https://")));
-        assert!(man.tools.iter().all(|t| {
-            t.sha256.len() == 64 && t.sha256.chars().all(|c| c.is_ascii_hexdigit())
-        }));
+        assert!(man.tools.iter().any(|t| t.id == "mpv" && t.optional));
+        assert_eq!(man.tools.len(), 2);
+        let hosts = [
+            "windows-x86_64",
+            "linux-x86_64",
+            "linux-aarch64",
+            "macos-x86_64",
+            "macos-aarch64",
+        ];
+        for spec in &man.tools {
+            for host in hosts {
+                let resolved = resolve_tool(spec, host)
+                    .unwrap_or_else(|| panic!("{} missing pin for {host}", spec.id));
+                assert!(!resolved.exe_names.is_empty());
+                if resolved.optional {
+                    continue;
+                }
+                assert_eq!(resolved.source, "system");
+                assert!(!resolved.install_hint.is_empty());
+                assert!(resolved.url.is_empty() || resolved.sha256.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn embedded_manifest_resolves_current_host() {
+        let man = load_manifest().unwrap();
+        let host = current_host();
+        assert!(host.contains('-'));
+        for id in ["ffmpeg", "mpv"] {
+            let spec = man.tools.iter().find(|t| t.id == id).unwrap();
+            let resolved = resolve_tool(spec, &host).expect("host pin");
+            assert!(!resolved.exe_names.is_empty());
+        }
+    }
+
+    #[test]
+    fn system_tool_on_path_counts_as_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let name = if cfg!(windows) {
+            "studio-fake-ffmpeg.exe"
+        } else {
+            "studio-fake-ffmpeg"
+        };
+        let exe = bin.join(name);
+        fs::write(&exe, b"x").unwrap();
+        let old = std::env::var_os("PATH");
+        let mut paths = vec![bin.clone()];
+        if let Some(ref p) = old {
+            paths.extend(std::env::split_paths(p));
+        }
+        std::env::set_var("PATH", std::env::join_paths(&paths).unwrap());
+        let spec = ToolSpec {
+            id: "ffmpeg".into(),
+            label: "ffmpeg".into(),
+            url: String::new(),
+            sha256: String::new(),
+            exe_names: vec![name.into()],
+            dest_subdir: "ffmpeg".into(),
+            targets: Vec::new(),
+            source: "system".into(),
+            install_hint: "apt install ffmpeg".into(),
+            archive: String::new(),
+            optional: false,
+        };
+        let present = tool_present(tmp.path(), &spec);
+        match old {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+        assert!(present);
     }
 
     #[test]
@@ -272,6 +578,33 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read_to_string(dest.join("ffmpeg.exe")).unwrap(), "ffmpeg");
         assert_eq!(fs::read_to_string(dest.join("ffprobe.exe")).unwrap(), "ffprobe");
+    }
+
+    #[test]
+    fn extract_zip_tree_keeps_prefix_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("tree.zip");
+        {
+            let f = fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zw.start_file("bin/tool.exe", opts).unwrap();
+            zw.write_all(b"launch").unwrap();
+            zw.start_file("lib/plugins/plugin.dll", opts).unwrap();
+            zw.write_all(b"plug").unwrap();
+            zw.finish().unwrap();
+        }
+        let dest = tmp.path().join("prefix");
+        extract_zip_tree(&zip_path, &dest).unwrap();
+        assert_eq!(
+            fs::read_to_string(dest.join("bin").join("tool.exe")).unwrap(),
+            "launch"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join("lib").join("plugins").join("plugin.dll")).unwrap(),
+            "plug"
+        );
     }
 
     #[test]

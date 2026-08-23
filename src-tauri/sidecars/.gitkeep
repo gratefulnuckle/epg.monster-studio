@@ -1,0 +1,1 @@
+# ghoul.exe is copied here by scripts/stage-sidecars.mjs after cargo build -p ghoul --release

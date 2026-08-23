@@ -207,7 +207,7 @@ impl TunerManager {
         Ok(())
     }
 
-    /// C# `TunerHostManager.Apply`: start enabled+running hosts, dispose the rest.
+    /// Start enabled+running hosts; dispose the rest.
     pub fn apply(
         &mut self,
         settings: &mut AppSettings,

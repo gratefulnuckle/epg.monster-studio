@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Serial ffmpeg/ffprobe probes of managed variants, slate/black detection, grades, pause/resume, auto-swap with undo, weekly group slices. WinUI: `AutoAuditPage`, `AuditResultsWindow`, `AuditPickDialog`.
+Serial ffmpeg/ffprobe probes of managed variants, slate/black detection, grades, pause/resume, auto-swap with undo, weekly group slices.
 
 ## Requirements
 
@@ -12,7 +12,14 @@ The system SHALL title the page `Stream Audit` and include the shipped intro cop
 #### Scenario: Toolbar buttons
 - GIVEN Stream Audit is open
 - WHEN the toolbar is visible
-- THEN it contains exactly these actions: `Start (all variants)`, `Visible only`, `Audit specific channels…`, `Run today's groups`, `Pause`, `Resume`, `Cancel`, `Undo last swap`, checkbox `Auto-swap on fail` (default checked), and `# Results`
+- THEN it contains these actions: `Start` (all / visible / specific / today's groups), `Pause`, `Resume`, `Cancel`, `Undo last swap`, checkbox `Auto-swap on fail` (default checked), `# Results` on the far right, and a trash icon immediately to its right that clears the current audit
+
+#### Scenario: Clear current audit
+- GIVEN Stream Audit has a job or stored `audit_results`
+- WHEN the operator clicks the trash icon and confirms
+- THEN the job, feed, and `audit_results` rows are discarded
+- AND `# Results` shows no count
+- AND the page returns to Idle
 
 ### Requirement: Strictly serial probes
 The system MUST run at most one ffmpeg/ffprobe process globally. Default delay is **6000 ms**, default timeout **15000 ms**.
@@ -28,7 +35,7 @@ The system MUST run at most one ffmpeg/ffprobe process globally. Default delay i
 - THEN at least `AuditDelayMs` have elapsed (unless cancelled)
 
 ### Requirement: Offline slate fail
-The system SHALL, after a decode that ffmpeg considers OK, grab a center-crop frame and average-hash it against bundled `offline-slate.png` plus files in `%LocalAppData%\epg.monster-studio\offline-slates\`. A match is a FAIL (`offline slate`) so auto-swap can fire.
+The system SHALL, after a decode that ffmpeg considers OK, grab a center-crop frame and average-hash it against bundled `offline-slate.png` plus files in `{app}/data/offline-slates/`. A match is a FAIL (`offline slate`) so auto-swap can fire.
 
 #### Scenario: Known offline card
 - GIVEN a stream that only shows the known offline still

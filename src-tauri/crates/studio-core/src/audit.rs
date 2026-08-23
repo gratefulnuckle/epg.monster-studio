@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
+use crate::logo::PLAYER_UA;
 use crate::models::{ManagedChannel, StreamVariant};
 use crate::paths::{audit_process_db_path, offline_slates_directory};
 use crate::settings::AppSettings;
@@ -25,6 +27,7 @@ pub enum Interrupt {
 
 static INTERRUPT: AtomicU8 = AtomicU8::new(0);
 static PLAYER_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PROBE_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn request_interrupt(kind: Interrupt) {
     INTERRUPT.store(kind as u8, Ordering::SeqCst);
@@ -92,7 +95,7 @@ pub fn classify_error(error: &str) -> String {
     if e.contains("-138") {
         return "connect-timeout".into();
     }
-    if e.contains("i/o error") || e.contains("io error") {
+    if e.contains("i/o error") || e.contains("io error") || e.contains("stream failed") {
         return "io-error".into();
     }
     if e.trim() == "timeout" || e.contains("timed out") {
@@ -124,7 +127,7 @@ pub fn display_name(cls: &str) -> &'static str {
         "http-401" => "HTTP 401",
         "http-other" => "HTTP error",
         "connect-timeout" => "Connect timeout",
-        "io-error" => "I/O error",
+        "io-error" => "Stream failed",
         "probe-timeout" => "Probe timeout",
         "decode-abort" => "Decode abort",
         "cancelled" => "Cancelled",
@@ -614,7 +617,7 @@ impl ProcessStore {
     pub fn load_feed(&self) -> Result<Vec<AuditFeedRow>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT seq,is_header,title,subtitle,detail,grade,status_label,latency_label,ok
-             FROM feed ORDER BY seq",
+             FROM feed ORDER BY seq DESC LIMIT 80",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(AuditFeedRow {
@@ -629,7 +632,9 @@ impl ProcessStore {
                 ok: r.get::<_, i64>(8)? != 0,
             })
         })?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        let mut out: Vec<AuditFeedRow> = rows.filter_map(|r| r.ok()).collect();
+        out.reverse();
+        Ok(out)
     }
 
     pub fn clear(&self) -> Result<(), StoreError> {
@@ -758,7 +763,7 @@ pub fn begin_job(
     visible_only: bool,
     channel_ids: Option<&[String]>,
 ) -> Result<AuditJob, StoreError> {
-    let channels = store.list_managed(None)?;
+    let channels = store.list_managed_opt(None, false)?;
     let by_id: HashMap<String, ManagedChannel> =
         channels.iter().cloned().map(|c| (c.id.clone(), c)).collect();
     let mut variants = store.list_all_variants()?;
@@ -848,10 +853,13 @@ pub struct AuditStep {
 }
 
 pub fn next_step(
-    store: &SqliteStore,
+    store_mu: &std::sync::Mutex<SqliteStore>,
     process: &ProcessStore,
     settings: &AppSettings,
 ) -> Result<AuditStep, StoreError> {
+    let store = store_mu
+        .lock()
+        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
     let mut job = process
         .load_job()?
         .ok_or_else(|| StoreError::Io(std::io::Error::other("No saved Stream Audit")))?;
@@ -933,7 +941,31 @@ pub fn next_step(
         "backup"
     };
     let ch = store.get_managed(&item.channel_id)?;
-    let mut result = probe_url(&ffmpeg, &ffprobe, &variant.url, timeout);
+    let backups: Vec<StreamVariant> = if settings.auto_swap_on_audit_fail
+        && variant.visibility.eq_ignore_ascii_case("visible")
+    {
+        store
+            .get_managed(&variant.managed_channel_id)?
+            .map(|full| {
+                let mut b: Vec<StreamVariant> =
+                    full.variants.into_iter().filter(|v| v.id != variant.id).collect();
+                b.sort_by_key(|v| v.priority);
+                b
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let swap_tvg = ch.as_ref().and_then(|c| c.tvg_id.clone());
+    let swap_channel_id = variant.managed_channel_id.clone();
+    drop(store);
+    let mut result = probe_one(
+        &ffmpeg,
+        &ffprobe,
+        &variant.url,
+        timeout,
+        settings.black_detect_enabled,
+    );
     if probe_cancelled(&result) {
         apply_interrupt_to_job(&mut job, process)?;
         return Ok(AuditStep {
@@ -942,22 +974,21 @@ pub fn next_step(
             done: true,
         });
     }
-    result = apply_offline_slate(result, &ffmpeg, &variant.url, timeout);
-    if settings.black_detect_enabled {
-        result = apply_black_detect(result, &ffmpeg, &variant.url, timeout);
-    }
     result.target_type = "variant".into();
     result.target_id = variant.id.clone();
     result.job_id = Some(job.id.clone());
     result.channel_id = Some(item.channel_id.clone());
     result.channel_name = Some(item.channel_name.clone());
     result.group_title = Some(item.group_title.clone());
-    result.tvg_id = ch.as_ref().and_then(|c| c.tvg_id.clone());
+    result.tvg_id = swap_tvg.clone();
     result.error_class = Some(if result.ok {
         String::new()
     } else {
         classify_error(result.error.as_deref().unwrap_or(""))
     });
+    let store = store_mu
+        .lock()
+        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
     store.insert_audit_result(&result)?;
     store.update_variant_audit(&variant.id, result.ok, &result.probed_at)?;
 
@@ -979,55 +1010,55 @@ pub fn next_step(
         && job.auto_swap
         && settings.auto_swap_on_audit_fail
         && variant.visibility.eq_ignore_ascii_case("visible")
+        && !backups.is_empty()
     {
-        if let Some(full) = store.get_managed(&variant.managed_channel_id)? {
-            let mut backups: Vec<StreamVariant> = full
-                .variants
-                .into_iter()
-                .filter(|v| v.id != variant.id)
-                .collect();
-            backups.sort_by_key(|v| v.priority);
-            for backup in backups {
-                if delay > 0 {
-                    std::thread::sleep(Duration::from_millis(delay));
-                }
-                let mut br = probe_url(&ffmpeg, &ffprobe, &backup.url, timeout);
-                br = apply_offline_slate(br, &ffmpeg, &backup.url, timeout);
-                if settings.black_detect_enabled {
-                    br = apply_black_detect(br, &ffmpeg, &backup.url, timeout);
-                }
-                br.target_type = "variant".into();
-                br.target_id = backup.id.clone();
-                br.job_id = Some(job.id.clone());
-                br.channel_id = Some(item.channel_id.clone());
-                br.channel_name = Some(item.channel_name.clone());
-                br.group_title = Some(item.group_title.clone());
-                br.tvg_id = full.tvg_id.clone();
-                br.error_class = Some(if br.ok {
-                    String::new()
-                } else {
-                    classify_error(br.error.as_deref().unwrap_or(""))
-                });
-                store.insert_audit_result(&br)?;
-                store.update_variant_audit(&backup.id, br.ok, &br.probed_at)?;
-                if br.ok {
-                    job.ok_count += 1;
-                } else {
-                    job.fail_count += 1;
-                }
-                *grades.entry(br.grade.clone()).or_insert(0) += 1;
-                job.grades_json = serialize_grades(&grades);
-                let role = if br.ok { "backup-swap" } else { "backup" };
-                if br.ok {
-                    store.swap_visible(&full.id, &variant.id, &backup.id, "auto_audit")?;
-                }
-                let row = feed_from_result(&item.channel_name, &item.group_title, role, &br, feed_seq);
-                feed_seq += 1;
-                process.append_feed(&row)?;
-                added.push(row);
-                if br.ok {
-                    break;
-                }
+        drop(store);
+        for backup in backups {
+            if delay > 0 {
+                std::thread::sleep(Duration::from_millis(delay));
+            }
+            let mut br = probe_one(
+                &ffmpeg,
+                &ffprobe,
+                &backup.url,
+                timeout,
+                settings.black_detect_enabled,
+            );
+            br.target_type = "variant".into();
+            br.target_id = backup.id.clone();
+            br.job_id = Some(job.id.clone());
+            br.channel_id = Some(item.channel_id.clone());
+            br.channel_name = Some(item.channel_name.clone());
+            br.group_title = Some(item.group_title.clone());
+            br.tvg_id = swap_tvg.clone();
+            br.error_class = Some(if br.ok {
+                String::new()
+            } else {
+                classify_error(br.error.as_deref().unwrap_or(""))
+            });
+            let store = store_mu
+                .lock()
+                .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
+            store.insert_audit_result(&br)?;
+            store.update_variant_audit(&backup.id, br.ok, &br.probed_at)?;
+            if br.ok {
+                job.ok_count += 1;
+            } else {
+                job.fail_count += 1;
+            }
+            *grades.entry(br.grade.clone()).or_insert(0) += 1;
+            job.grades_json = serialize_grades(&grades);
+            let role = if br.ok { "backup-swap" } else { "backup" };
+            if br.ok {
+                store.swap_visible(&swap_channel_id, &variant.id, &backup.id, "auto_audit")?;
+            }
+            drop(store);
+            let row = feed_from_result(&item.channel_name, &item.group_title, role, &br, feed_seq);
+            feed_seq += 1;
+            process.append_feed(&row)?;
+            added.push(row);
+            if br.ok {
+                break;
             }
         }
     }
@@ -1078,7 +1109,115 @@ fn feed_from_result(
     }
 }
 
+fn is_http_url(url: &str) -> bool {
+    let u = url.trim();
+    u.len() >= 7
+        && (u[..7].eq_ignore_ascii_case("http://")
+            || (u.len() >= 8 && u[..8].eq_ignore_ascii_case("https://")))
+}
+
+/// ffmpeg HTTP input flags. Live IPTV often refuses the default Lavf user-agent
+/// (`Error opening input: I/O error`); VLC UA matches Play / logo probe.
+fn http_input_opts(
+    url: &str,
+    extra: Option<&BTreeMap<String, String>>,
+    timeout_us: i64,
+) -> Vec<String> {
+    if !is_http_url(url) {
+        return Vec::new();
+    }
+    let mut ua = PLAYER_UA.to_string();
+    let mut extra_lines = Vec::new();
+    if let Some(h) = extra {
+        for (k, v) in h {
+            if k.eq_ignore_ascii_case("user-agent") {
+                if !v.trim().is_empty() {
+                    ua = v.clone();
+                }
+            } else if !k.trim().is_empty() && !v.is_empty() {
+                extra_lines.push(format!("{k}: {v}"));
+            }
+        }
+    }
+    // Do not pass -rw_timeout on HTTP: this CDN 302s HTTPS → HTTP and
+    // ffmpeg then fails with "Error opening input files: I/O error".
+    let mut opts = vec![
+        "-timeout".into(),
+        timeout_us.max(1_000_000).to_string(),
+        "-user_agent".into(),
+        ua,
+    ];
+    if !extra_lines.is_empty() {
+        opts.push("-headers".into());
+        opts.push(extra_lines.join("\r\n") + "\r\n");
+    }
+    opts
+}
+
+fn http_timeout_us(timeout_ms: i32) -> i64 {
+    timeout_ms.max(1000) as i64 * 1000
+}
+
+/// Build ffmpeg/ffprobe argv. HTTP(S) gets `-timeout` + `-user_agent` and
+/// never `-rw_timeout` (that flag breaks HTTPS→HTTP MPEG-TS redirects).
+fn ffmpeg_input_args(
+    before: &[&str],
+    url: &str,
+    after: &[&str],
+    timeout_us: i64,
+    headers: Option<&BTreeMap<String, String>>,
+) -> Vec<String> {
+    let http = http_input_opts(url, headers, timeout_us);
+    let mut args: Vec<String> = Vec::new();
+    let mut skip = false;
+    for a in before {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if !http.is_empty() && *a == "-rw_timeout" {
+            skip = true;
+            continue;
+        }
+        args.push((*a).to_string());
+    }
+    args.extend(http);
+    args.push("-i".into());
+    args.push(url.to_string());
+    args.extend(after.iter().map(|s| (*s).to_string()));
+    args
+}
+
+fn run_input(
+    bin: &str,
+    before: &[&str],
+    url: &str,
+    after: &[&str],
+    timeout: Duration,
+    timeout_us: i64,
+    headers: Option<&BTreeMap<String, String>>,
+    capture_stdout: bool,
+) -> (bool, String, bool) {
+    let args = ffmpeg_input_args(before, url, after, timeout_us, headers);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    if capture_stdout {
+        run_tool_stdout(bin, &refs, timeout)
+    } else {
+        run_tool(bin, &refs, timeout)
+    }
+}
+
 pub fn probe_url(ffmpeg: &str, ffprobe: &str, url: &str, timeout_ms: i32) -> AuditResult {
+    probe_url_with(ffmpeg, ffprobe, url, timeout_ms, None)
+}
+
+fn probe_url_with(
+    ffmpeg: &str,
+    ffprobe: &str,
+    url: &str,
+    timeout_ms: i32,
+    headers: Option<&BTreeMap<String, String>>,
+) -> AuditResult {
     let start = Instant::now();
     if ffmpeg.is_empty() || !Path::new(ffmpeg).is_file() {
         return finalize_grade(AuditResult {
@@ -1094,24 +1233,17 @@ pub fn probe_url(ffmpeg: &str, ffprobe: &str, url: &str, timeout_ms: i32) -> Aud
         });
     }
     let timeout = Duration::from_millis((timeout_ms.max(1000) + 2000) as u64);
-    let rw = (timeout_ms as i64) * 1000;
-    let (ok, stderr, killed) = run_tool(
+    let timeout_us = http_timeout_us(timeout_ms);
+    let rw = timeout_us.to_string();
+    let (ok, stderr, killed) = run_input(
         ffmpeg,
-        &[
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-rw_timeout",
-            &rw.to_string(),
-            "-i",
-            url,
-            "-t",
-            "2",
-            "-f",
-            "null",
-            "-",
-        ],
+        &["-hide_banner", "-loglevel", "error", "-rw_timeout", &rw],
+        url,
+        &["-t", "2", "-f", "null", "-"],
         timeout,
+        timeout_us,
+        headers,
+        false,
     );
     let latency = start.elapsed().as_millis() as i32;
     if killed && (stderr == "__cancelled__" || interrupt_kind() != Interrupt::None) {
@@ -1150,7 +1282,7 @@ pub fn probe_url(ffmpeg: &str, ffprobe: &str, url: &str, timeout_ms: i32) -> Aud
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "exit 1".into());
-        Some(last)
+        Some(clarify_io_error(&last))
     };
     let mut result = AuditResult {
         id: uuid::Uuid::new_v4().simple().to_string(),
@@ -1164,16 +1296,60 @@ pub fn probe_url(ffmpeg: &str, ffprobe: &str, url: &str, timeout_ms: i32) -> Aud
         ..AuditResult::default()
     };
     if ok && Path::new(ffprobe).is_file() {
-        enrich_ffprobe(&mut result, ffprobe, url, timeout_ms.min(12000));
+        enrich_ffprobe(&mut result, ffprobe, url, timeout_ms.min(12000), headers);
     }
     finalize_grade(result)
 }
 
-fn apply_offline_slate(mut result: AuditResult, ffmpeg: &str, url: &str, timeout_ms: i32) -> AuditResult {
+/// One stream probe: ffmpeg/ffprobe, offline-slate images, optional blackdetect.
+/// Same path Stream Audit uses per variant.
+pub fn probe_one(
+    ffmpeg: &str,
+    ffprobe: &str,
+    url: &str,
+    timeout_ms: i32,
+    black_detect: bool,
+) -> AuditResult {
+    probe_one_with(ffmpeg, ffprobe, url, timeout_ms, black_detect, None)
+}
+
+pub fn probe_one_with(
+    ffmpeg: &str,
+    ffprobe: &str,
+    url: &str,
+    timeout_ms: i32,
+    black_detect: bool,
+    headers: Option<&BTreeMap<String, String>>,
+) -> AuditResult {
+    let _g = PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    ensure_slate_templates(ffmpeg);
+    let mut result = probe_url_with(ffmpeg, ffprobe, url, timeout_ms, headers);
+    if probe_cancelled(&result) {
+        return result;
+    }
+    result = apply_offline_slate(result, ffmpeg, url, timeout_ms, headers);
+    if black_detect {
+        result = apply_black_detect(result, ffmpeg, url, timeout_ms, headers);
+    }
+    result.error_class = Some(if result.ok {
+        String::new()
+    } else {
+        classify_error(result.error.as_deref().unwrap_or(""))
+    });
+    result
+}
+
+fn apply_offline_slate(
+    mut result: AuditResult,
+    ffmpeg: &str,
+    url: &str,
+    timeout_ms: i32,
+    headers: Option<&BTreeMap<String, String>>,
+) -> AuditResult {
     if !result.ok {
         return result;
     }
-    let Some(hash) = hash_live_frame(ffmpeg, url, timeout_ms.min(8000)) else {
+    let Some(hash) = hash_live_frame(ffmpeg, url, timeout_ms.min(8000), headers) else {
         return result;
     };
     if let Some(dist) = match_slate(&hash) {
@@ -1185,7 +1361,13 @@ fn apply_offline_slate(mut result: AuditResult, ffmpeg: &str, url: &str, timeout
     result
 }
 
-fn apply_black_detect(mut result: AuditResult, ffmpeg: &str, url: &str, timeout_ms: i32) -> AuditResult {
+fn apply_black_detect(
+    mut result: AuditResult,
+    ffmpeg: &str,
+    url: &str,
+    timeout_ms: i32,
+    headers: Option<&BTreeMap<String, String>>,
+) -> AuditResult {
     if !result.ok {
         return result;
     }
@@ -1193,15 +1375,11 @@ fn apply_black_detect(mut result: AuditResult, ffmpeg: &str, url: &str, timeout_
     let timeout = Duration::from_millis((timeout_ms.min(12000).max(secs * 1000 + 3000)) as u64);
     let clean = url.replace('"', "");
     let t = secs.to_string();
-    let (_, stderr, _) = run_tool(
+    let (_, stderr, _) = run_input(
         ffmpeg,
+        &["-hide_banner", "-nostdin", "-t", &t],
+        &clean,
         &[
-            "-hide_banner",
-            "-nostdin",
-            "-t",
-            &t,
-            "-i",
-            &clean,
             "-vf",
             "blackdetect=d=1.5:pix_th=0.12",
             "-an",
@@ -1210,6 +1388,9 @@ fn apply_black_detect(mut result: AuditResult, ffmpeg: &str, url: &str, timeout_
             "-",
         ],
         timeout,
+        http_timeout_us(timeout_ms),
+        headers,
+        false,
     );
     if is_mostly_black(&stderr, secs as f64, 0.7) {
         result.ok = false;
@@ -1220,7 +1401,12 @@ fn apply_black_detect(mut result: AuditResult, ffmpeg: &str, url: &str, timeout_
     result
 }
 
-fn hash_live_frame(ffmpeg: &str, url: &str, timeout_ms: i32) -> Option<Vec<u8>> {
+fn hash_live_frame(
+    ffmpeg: &str,
+    url: &str,
+    timeout_ms: i32,
+    headers: Option<&BTreeMap<String, String>>,
+) -> Option<Vec<u8>> {
     if !Path::new(ffmpeg).is_file() || url.trim().is_empty() {
         return None;
     }
@@ -1228,20 +1414,16 @@ fn hash_live_frame(ffmpeg: &str, url: &str, timeout_ms: i32) -> Option<Vec<u8>> 
         "epg-monster-slate-{}.raw",
         uuid::Uuid::new_v4().simple()
     ));
-    let rw = timeout_ms.max(1) as i64 * 1000;
+    let timeout_us = http_timeout_us(timeout_ms);
+    let rw = timeout_us.to_string();
     let vf = format!("crop=iw/2:ih/2,scale={HASH_SIZE}:{HASH_SIZE}:flags=fast_bilinear,format=gray");
     let timeout = Duration::from_millis((timeout_ms + 2500) as u64);
     let tmp_s = tmp.to_string_lossy().into_owned();
-    let (ok, _, _) = run_tool(
+    let (ok, _, _) = run_input(
         ffmpeg,
+        &["-hide_banner", "-loglevel", "error", "-rw_timeout", &rw],
+        url,
         &[
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-rw_timeout",
-            &rw.to_string(),
-            "-i",
-            url,
             "-an",
             "-frames:v",
             "1",
@@ -1253,6 +1435,9 @@ fn hash_live_frame(ffmpeg: &str, url: &str, timeout_ms: i32) -> Option<Vec<u8>> 
             &tmp_s,
         ],
         timeout,
+        timeout_us,
+        headers,
+        false,
     );
     let raw = if ok { std::fs::read(&tmp).ok() } else { None };
     let _ = std::fs::remove_file(&tmp);
@@ -1363,10 +1548,17 @@ pub fn matches_hash(digest: &[u8], templates: &[Vec<u8>]) -> Option<i32> {
     }
 }
 
-fn enrich_ffprobe(result: &mut AuditResult, ffprobe: &str, url: &str, timeout_ms: i32) {
-    let rw = timeout_ms as i64 * 1000;
+fn enrich_ffprobe(
+    result: &mut AuditResult,
+    ffprobe: &str,
+    url: &str,
+    timeout_ms: i32,
+    headers: Option<&BTreeMap<String, String>>,
+) {
+    let timeout_us = http_timeout_us(timeout_ms);
+    let rw = timeout_us.to_string();
     let timeout = Duration::from_millis((timeout_ms + 1500) as u64);
-    let (ok, stdout, _) = run_tool_stdout(
+    let (ok, stdout, _) = run_input(
         ffprobe,
         &[
             "-v",
@@ -1380,11 +1572,14 @@ fn enrich_ffprobe(result: &mut AuditResult, ffprobe: &str, url: &str, timeout_ms
             "-analyzeduration",
             "2M",
             "-rw_timeout",
-            &rw.to_string(),
-            "-i",
-            url,
+            &rw,
         ],
+        url,
+        &[],
         timeout,
+        timeout_us,
+        headers,
+        true,
     );
     if !ok || stdout.trim().is_empty() {
         return;
@@ -1475,8 +1670,38 @@ fn gcd(mut a: i32, mut b: i32) -> i32 {
     a.abs()
 }
 
+fn clarify_io_error(msg: &str) -> String {
+    let e = msg.to_ascii_lowercase();
+    if e.contains("i/o error")
+        || e.contains("io error")
+        || e.contains("error opening input")
+        || e.contains("server returned")
+        || e.contains("-138")
+    {
+        "Stream failed".into()
+    } else {
+        crate::issue::redact(msg)
+    }
+}
+
+fn spawn_tool(bin: &str) -> Command {
+    let mut cmd = Command::new(bin);
+    if let Some(dir) = Path::new(bin).parent() {
+        if dir.is_dir() {
+            cmd.current_dir(dir);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 fn run_tool(bin: &str, args: &[&str], timeout: Duration) -> (bool, String, bool) {
-    let mut child = match Command::new(bin)
+    let mut child = match spawn_tool(bin)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1513,7 +1738,7 @@ fn run_tool(bin: &str, args: &[&str], timeout: Duration) -> (bool, String, bool)
 }
 
 fn run_tool_stdout(bin: &str, args: &[&str], timeout: Duration) -> (bool, String, bool) {
-    let mut child = match Command::new(bin)
+    let mut child = match spawn_tool(bin)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1575,6 +1800,7 @@ mod tests {
             ("Error opening input files: Error number -138 occurred", "connect-timeout"),
             ("Error opening input files: Server returned 404 Not Found", "http-404"),
             ("Error opening input files: I/O error", "io-error"),
+            ("Stream failed", "io-error"),
             ("Timeout", "probe-timeout"),
             ("Terminating thread with return code -1145393733", "decode-abort"),
         ];
@@ -1769,6 +1995,67 @@ mod tests {
             ..AuditResult::default()
         });
         assert_eq!(r.grade, "F");
+    }
+
+    #[test]
+    fn probe_one_missing_ffmpeg_is_f() {
+        let r = probe_one("no-such-ffmpeg", "no-such-ffprobe", "http://example.com/live", 1000, true);
+        assert!(!r.ok);
+        assert_eq!(r.grade, "F");
+        assert!(r.error.as_deref().unwrap_or("").contains("ffmpeg"));
+    }
+
+    #[test]
+    fn http_input_opts_sends_vlc_user_agent() {
+        let opts = http_input_opts("http://cdn.example/live.ts", None, 15_000_000);
+        let ua = opts.windows(2).find(|w| w[0] == "-user_agent").map(|w| w[1].as_str());
+        assert_eq!(ua, Some(PLAYER_UA));
+        assert!(opts.windows(2).any(|w| w[0] == "-timeout" && w[1] == "15000000"));
+        assert!(!opts.iter().any(|a| a == "-rw_timeout"));
+        assert!(opts.windows(2).find(|w| w[0] == "-headers").is_none());
+        assert!(http_input_opts("C:\\file.ts", None, 15_000_000).is_empty());
+    }
+
+    #[test]
+    fn http_input_opts_extra_headers_skip_user_agent() {
+        let mut extra = BTreeMap::new();
+        extra.insert("Referer".into(), "https://example.com/".into());
+        extra.insert("User-Agent".into(), "CustomUA/1".into());
+        let opts = http_input_opts("https://cdn.example/live.ts", Some(&extra), 5_000_000);
+        let ua = opts.windows(2).find(|w| w[0] == "-user_agent").map(|w| w[1].as_str());
+        assert_eq!(ua, Some("CustomUA/1"));
+        let hdr = opts.windows(2).find(|w| w[0] == "-headers").map(|w| w[1].as_str());
+        assert!(hdr.is_some_and(|h| h.contains("Referer: https://example.com/") && !h.to_ascii_lowercase().contains("user-agent")));
+    }
+
+    #[test]
+    fn ffmpeg_input_args_drops_rw_timeout_on_http() {
+        let args = ffmpeg_input_args(
+            &["-hide_banner", "-rw_timeout", "15000000", "-loglevel", "error"],
+            "https://cdn.example/live.ts",
+            &["-t", "2", "-f", "null", "-"],
+            15_000_000,
+            None,
+        );
+        assert!(!args.iter().any(|a| a == "-rw_timeout"));
+        assert!(args.windows(2).any(|w| w[0] == "-timeout" && w[1] == "15000000"));
+        assert!(args.windows(2).any(|w| w[0] == "-user_agent" && w[1] == PLAYER_UA));
+        let i = args.iter().position(|a| a == "-i").expect("-i");
+        assert_eq!(args.get(i + 1).map(String::as_str), Some("https://cdn.example/live.ts"));
+    }
+
+    #[test]
+    fn ffmpeg_input_args_keeps_rw_timeout_on_file() {
+        let args = ffmpeg_input_args(
+            &["-hide_banner", "-rw_timeout", "8000000"],
+            "C:\\local\\clip.ts",
+            &["-t", "1"],
+            8_000_000,
+            None,
+        );
+        assert!(args.windows(2).any(|w| w[0] == "-rw_timeout" && w[1] == "8000000"));
+        assert!(!args.iter().any(|a| a == "-user_agent"));
+        assert!(!args.iter().any(|a| a == "-timeout"));
     }
 
     #[test]

@@ -1,12 +1,12 @@
 {
-  "name": "epg.monster-studio-tauri",
+  "name": "epg.monster-studio",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.0.2",
   "type": "module",
   "license": "GPL-3.0-or-later",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "node ./node_modules/typescript/bin/tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"
   },

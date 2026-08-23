@@ -4,8 +4,8 @@ resolver = "2"
 
 [package]
 name = "epg-monster-studio"
-version = "2.0.0"
-description = "epg.monster studio (tauri)"
+version = "2.0.2"
+description = "epg.monster studio"
 authors = ["epg.monster"]
 license = "GPL-3.0-or-later"
 edition = "2021"
@@ -22,8 +22,26 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 studio-core = { path = "crates/studio-core" }
 studio-tuner = { path = "crates/studio-tuner" }
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# custom-protocol = load UI from dist/ inside the .exe (no Vite, no 127.0.0.1).
+# `tauri dev` passes --no-default-features so it can still use a local server.
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.dev]
+# Keep debug info off for crates.io deps (the 300 MB GNU exe). Workspace
+# crates keep line tables so tauri-dev panics still have a useful file:line.
+debug = 0
+
+[profile.dev.package."epg-monster-studio"]
+debug = "line-tables-only"
+[profile.dev.package.studio-core]
+debug = "line-tables-only"
+[profile.dev.package.studio-tuner]
+debug = "line-tables-only"

@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 
 type SplashCheck = { label: string; ok: boolean; detail: string };
 type SplashEpg = { catalog: number; programmes: number; cached: boolean };
@@ -17,7 +16,7 @@ export async function runSplash(app: HTMLElement): Promise<void> {
         <div class="splash-list" id="splash-list"></div>
         <div class="splash-mid">
           <div class="splash-ver-line">
-            <span class="splash-ver" id="splash-ver">epg.monster studio  ·  v2.0.0 (dev)</span>
+            <span class="splash-ver" id="splash-ver">epg.monster studio  ·  2026 edition</span>
             <span class="splash-ver-sep"> / </span>
             <span class="splash-issues-line" id="splash-issues">0 open issues</span>
           </div>
@@ -54,20 +53,16 @@ export async function runSplash(app: HTMLElement): Promise<void> {
   setProgress(lock, pct, 0);
 
   try {
-    const missing = await invoke<{ id: string; label: string }[]>("tools_missing");
+    const missing = await invoke<{
+      id: string;
+      label: string;
+      source?: string;
+      installHint?: string;
+    }[]>("tools_missing");
     if (missing.length > 0) {
-      status.textContent = "Downloading portable ffmpeg / mpv…";
-      const unlisten = await listen<{ message: string; percent: number }>("tools-progress", (ev) => {
-        status.textContent = ev.payload.message;
-        setProgress(lock, pct, Math.max(1, Math.min(44, ev.payload.percent * 0.45)));
-      });
-      try {
-        await invoke("tools_ensure");
-      } catch {
-        status.textContent = "Tool download failed — you can set paths in Settings.";
-      } finally {
-        unlisten();
-      }
+      status.textContent = missing
+        .map((t) => t.installHint || `Need ${t.label} on PATH. Run studio.ps1 / studio.sh --install.`)
+        .join(" ");
     }
   } catch {
     /* keep going — tools can be set in Settings */
@@ -80,7 +75,7 @@ export async function runSplash(app: HTMLElement): Promise<void> {
     checks = [
       { label: "Application data folder", ok: false, detail: "waiting…" },
       { label: "SQLite database", ok: false, detail: "waiting…" },
-      { label: "mpv player", ok: false, detail: "waiting…" },
+      { label: "mpv (optional)", ok: false, detail: "waiting…" },
       { label: "ffmpeg (auto-audit)", ok: false, detail: "waiting…" },
       { label: "ffprobe", ok: false, detail: "waiting…" },
       { label: "VLC (optional)", ok: false, detail: "waiting…" },

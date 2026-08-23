@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Cursor, Read};
+use std::io::{BufRead, BufReader, Cursor, Read};
 use std::path::Path;
 
 use flate2::read::GzDecoder;
@@ -14,8 +14,97 @@ use crate::models::{CatalogEntry, EpgAuditRow, ManagedChannel};
 use crate::settings::AppSettings;
 use crate::USER_AGENT;
 
-pub const DEFAULT_XML_URL: &str = "https://epg.monster/epg.xml";
+pub const DEFAULT_XML_URL: &str = "https://epg.monster/epg.xml.gz";
 pub const REFRESH_INTERVAL_SECS: i64 = 30 * 60;
+/// HTTP body cap (gzip or raw). epg.monster's gzip is typically well under this;
+/// uncompressed `epg.xml` is not — we rewrite that URL to `.gz`.
+pub const XMLTV_DOWNLOAD_MAX: u64 = 512 * 1024 * 1024;
+/// On-disk uncompressed XML cap. Streamed to disk; not loaded as one String.
+pub const XMLTV_FILE_MAX: u64 = 2 * 1024 * 1024 * 1024;
+/// Legacy alias used by purge / size checks on cache files.
+pub const XMLTV_MAX_BYTES: u64 = XMLTV_FILE_MAX;
+
+pub fn xmltv_too_large(len: u64) -> bool {
+    len > XMLTV_FILE_MAX
+}
+
+/// Prefer the gzip catalog. Uncompressed epg.monster/epg.xml is hundreds of MB
+/// and trips download caps; `.gz` is the supported v2 URL.
+pub fn prefer_compact_xmltv_url(url: &str) -> String {
+    let t = url.trim();
+    let lower = t.to_ascii_lowercase();
+    if (lower == "https://epg.monster/epg.xml" || lower == "http://epg.monster/epg.xml")
+        && !lower.ends_with(".gz")
+    {
+        return "https://epg.monster/epg.xml.gz".into();
+    }
+    t.to_string()
+}
+
+pub fn read_capped<R: Read>(src: R, max: u64) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    let n = src
+        .take(max.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    if n as u64 > max {
+        return Err(format!(
+            "XMLTV larger than {} MB — refused.",
+            max / (1024 * 1024)
+        ));
+    }
+    Ok(buf)
+}
+
+fn copy_capped<R: Read>(src: R, dest: &Path, max: u64) -> Result<u64, String> {
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let mut out = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+    let n = std::io::copy(&mut src.take(max.saturating_add(1)), &mut out)
+        .map_err(|e| e.to_string())?;
+    if n > max {
+        let _ = std::fs::remove_file(dest);
+        return Err(format!(
+            "XMLTV larger than {} MB — refused.",
+            max / (1024 * 1024)
+        ));
+    }
+    Ok(n)
+}
+
+/// Delete XMLTV / gzip cache files above [`XMLTV_MAX_BYTES`] so rebuild cannot reopen them.
+pub fn purge_oversized_xmltv(dir: &Path) -> usize {
+    purge_oversized_xmltv_over(dir, XMLTV_MAX_BYTES)
+}
+
+fn purge_oversized_xmltv_over(dir: &Path, max: u64) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut n = 0;
+    for e in rd.flatten() {
+        let p = e.path();
+        let ext = p
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ext != "xml" && ext != "gz" {
+            continue;
+        }
+        let Ok(meta) = e.metadata() else {
+            continue;
+        };
+        if meta.len() == 0 || meta.len() <= max {
+            continue;
+        }
+        if std::fs::remove_file(&p).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
@@ -69,7 +158,7 @@ pub fn resolve_xml_urls(settings: &AppSettings) -> Vec<String> {
     };
     let mut out: Vec<String> = raw
         .into_iter()
-        .map(|u| u.trim().to_string())
+        .map(|u| prefer_compact_xmltv_url(&u))
         .filter(|u| !u.is_empty() && !is_epgshare_url(u))
         .collect();
     out.sort();
@@ -101,6 +190,37 @@ pub fn clean_epg_token(value: &str) -> String {
     collapsed.trim().to_string()
 }
 
+/// IDs to try when matching a playlist tvg-id to catalog/XMLTV (`KAUT-DT.us_locals1.us (src05)` → `KAUT-DT.us`).
+pub fn tvg_lookup_ids(tvg_id: &str) -> Vec<String> {
+    let raw = tvg_id.trim().to_string();
+    let cleaned = clean_epg_token(&raw);
+    let mut out = Vec::new();
+    let mut push = |s: String| {
+        let s = s.trim().to_string();
+        if !s.is_empty() && !out.iter().any(|x: &String| x.eq_ignore_ascii_case(&s)) {
+            out.push(s);
+        }
+    };
+    push(raw);
+    push(cleaned.clone());
+    push(cleaned.replace(' ', "."));
+    push(cleaned.replace('.', " "));
+    let no_paren = cleaned
+        .split(" (")
+        .next()
+        .unwrap_or(&cleaned)
+        .trim()
+        .to_string();
+    push(no_paren.clone());
+    let lower = no_paren.to_ascii_lowercase();
+    if let Some(idx) = lower.find(".us_locals") {
+        let stem = &no_paren[..idx];
+        push(format!("{stem}.us"));
+        push(stem.to_string());
+    }
+    out
+}
+
 fn html_decode(s: &str) -> String {
     s.replace("&amp;", "&")
         .replace("&lt;", "<")
@@ -120,23 +240,54 @@ pub fn materialize_xmltv(bytes: &[u8], dest: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     if looks_like_gzip(bytes) {
-        let mut dec = GzDecoder::new(Cursor::new(bytes));
         let mut out = Vec::new();
-        dec.read_to_end(&mut out)?;
+        let n = GzDecoder::new(Cursor::new(bytes))
+            .take(XMLTV_FILE_MAX.saturating_add(1))
+            .read_to_end(&mut out)?;
+        if n as u64 > XMLTV_FILE_MAX {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "decompressed XMLTV larger than {} MB — refused.",
+                    XMLTV_FILE_MAX / (1024 * 1024)
+                ),
+            ));
+        }
         std::fs::write(dest, out)
     } else {
+        if xmltv_too_large(bytes.len() as u64) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "XMLTV larger than {} MB — refused.",
+                    XMLTV_MAX_BYTES / (1024 * 1024)
+                ),
+            ));
+        }
         std::fs::write(dest, bytes)
     }
 }
 
 pub fn parse_xmltv_channels(xml: &str, source_label: &str) -> Vec<CatalogEntry> {
+    parse_xmltv_channels_read(xml.as_bytes(), source_label)
+}
+
+pub fn parse_xmltv_channels_from_path(
+    path: &Path,
+    source_label: &str,
+) -> Result<Vec<CatalogEntry>, String> {
+    let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    Ok(parse_xmltv_channels_read(BufReader::new(f), source_label))
+}
+
+fn parse_xmltv_channels_read<R: BufRead>(src: R, source_label: &str) -> Vec<CatalogEntry> {
     let source = if source_label.trim().is_empty() {
         "xmltv"
     } else {
         source_label.trim()
     };
     let mut list = Vec::new();
-    let mut reader = Reader::from_str(xml);
+    let mut reader = Reader::from_reader(src);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     loop {
@@ -195,15 +346,53 @@ pub fn parse_xmltv_channels(xml: &str, source_label: &str) -> Vec<CatalogEntry> 
     list
 }
 
+/// Compact UTC for SQLite lexicographic `start <= now < stop` (ISO-8601 `"O"` prefix).
+pub fn format_utc_z(dt: OffsetDateTime) -> String {
+    let dt = dt.to_offset(time::UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        dt.year(),
+        u8::from(dt.month()),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    )
+}
+
 pub fn index_programmes_from_xml(xml: &str) -> Vec<(String, String, String, String)> {
     parse_xmltv_programmes(xml, OffsetDateTime::now_utc())
 }
 
+pub fn index_programmes_from_path(path: &Path) -> Result<Vec<(String, String, String, String)>, String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if xmltv_too_large(meta.len()) {
+        return Err(format!(
+            "XMLTV {} is {} MB (max {} MB) — skipped.",
+            path.display(),
+            meta.len() / (1024 * 1024),
+            XMLTV_MAX_BYTES / (1024 * 1024)
+        ));
+    }
+    let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    Ok(parse_xmltv_programmes_read(
+        BufReader::new(f),
+        OffsetDateTime::now_utc(),
+    ))
+}
+
 pub fn parse_xmltv_programmes(xml: &str, now: OffsetDateTime) -> Vec<(String, String, String, String)> {
+    parse_xmltv_programmes_read(xml.as_bytes(), now)
+}
+
+fn parse_xmltv_programmes_read<R: BufRead>(
+    src: R,
+    now: OffsetDateTime,
+) -> Vec<(String, String, String, String)> {
     let window_start = now - Duration::hours(8);
     let window_end = now + Duration::hours(16);
     let mut list = Vec::new();
-    let mut reader = Reader::from_str(xml);
+    let mut reader = Reader::from_reader(src);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     loop {
@@ -245,12 +434,7 @@ pub fn parse_xmltv_programmes(xml: &str, now: OffsetDateTime) -> Vec<(String, St
                 if stop <= window_start || start >= window_end {
                     continue;
                 }
-                list.push((
-                    channel,
-                    title,
-                    start.format(&Rfc3339).unwrap_or_default(),
-                    stop.format(&Rfc3339).unwrap_or_default(),
-                ));
+                list.push((channel, title, format_utc_z(start), format_utc_z(stop)));
             }
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -540,12 +724,92 @@ pub fn fetch_xmltv_conditional(
             }
             let etag = resp.header("etag").map(|s| s.to_string());
             let last_modified = resp.header("last-modified").map(|s| s.to_string());
-            let mut bytes = Vec::new();
-            resp.into_reader()
-                .read_to_end(&mut bytes)
-                .map_err(|e| e.to_string())?;
+            if let Some(len) = resp
+                .header("content-length")
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                if len > XMLTV_DOWNLOAD_MAX {
+                    return Err(format!(
+                        "XMLTV Content-Length is {} MB (max {} MB) — refused.",
+                        len / (1024 * 1024),
+                        XMLTV_DOWNLOAD_MAX / (1024 * 1024)
+                    ));
+                }
+            }
+            let bytes = read_capped(resp.into_reader(), XMLTV_DOWNLOAD_MAX)?;
             Ok(FetchXmltv::Body {
                 bytes,
+                etag,
+                last_modified,
+            })
+        }
+    }
+}
+
+/// Download XMLTV (prefer gzip) and write uncompressed XML to `dest`. Streams
+/// to disk so epg.monster's catalog does not need a 256 MB RAM cap.
+pub fn fetch_xmltv_to_path(
+    url: &str,
+    dest: &Path,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+) -> Result<FetchXmltv, String> {
+    let url = prefer_compact_xmltv_url(url);
+    let mut req = ureq::get(&url).set("User-Agent", USER_AGENT);
+    if let Some(e) = etag.map(str::trim).filter(|s| !s.is_empty()) {
+        req = req.set("If-None-Match", e);
+    }
+    if let Some(lm) = last_modified.map(str::trim).filter(|s| !s.is_empty()) {
+        req = req.set("If-Modified-Since", lm);
+    }
+    match req.call() {
+        Err(ureq::Error::Status(304, _)) => Ok(FetchXmltv::NotModified),
+        Err(e) => Err(e.to_string()),
+        Ok(resp) => {
+            if resp.status() == 304 {
+                return Ok(FetchXmltv::NotModified);
+            }
+            let etag = resp.header("etag").map(|s| s.to_string());
+            let last_modified = resp.header("last-modified").map(|s| s.to_string());
+            if let Some(len) = resp
+                .header("content-length")
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                if len > XMLTV_DOWNLOAD_MAX {
+                    return Err(format!(
+                        "XMLTV Content-Length is {} MB (max {} MB gzip) — refused. Use epg.xml.gz.",
+                        len / (1024 * 1024),
+                        XMLTV_DOWNLOAD_MAX / (1024 * 1024)
+                    ));
+                }
+            }
+            let part = dest.with_extension("part");
+            copy_capped(resp.into_reader(), &part, XMLTV_DOWNLOAD_MAX)?;
+            let gzip = {
+                let mut mag = [0u8; 2];
+                let n = std::fs::File::open(&part)
+                    .and_then(|mut f| f.read(&mut mag))
+                    .unwrap_or(0);
+                n >= 2 && mag[0] == 0x1f && mag[1] == 0x8b
+            };
+            if gzip {
+                let gz = std::fs::File::open(&part).map_err(|e| e.to_string())?;
+                copy_capped(GzDecoder::new(gz), dest, XMLTV_FILE_MAX)?;
+                let _ = std::fs::remove_file(&part);
+            } else {
+                let len = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+                if xmltv_too_large(len) {
+                    let _ = std::fs::remove_file(&part);
+                    return Err(format!(
+                        "XMLTV is {} MB uncompressed (max {} MB) — use https://epg.monster/epg.xml.gz.",
+                        len / (1024 * 1024),
+                        XMLTV_FILE_MAX / (1024 * 1024)
+                    ));
+                }
+                std::fs::rename(&part, dest).map_err(|e| e.to_string())?;
+            }
+            Ok(FetchXmltv::Body {
+                bytes: Vec::new(),
                 etag,
                 last_modified,
             })
@@ -610,6 +874,13 @@ mod tests {
     }
 
     #[test]
+    fn lookup_ids_strip_locals_suffix() {
+        let ids = tvg_lookup_ids("KAUT-DT.us_locals1.us (src05)");
+        assert!(ids.iter().any(|s| s.eq_ignore_ascii_case("KAUT-DT.us")));
+        assert!(ids.iter().any(|s| s.eq_ignore_ascii_case("KAUT-DT.us_locals1.us")));
+    }
+
+    #[test]
     fn exact_match_not_overwritten() {
         let catalog = parse_xmltv_channels(SAMPLE, "epg.monster");
         let ch = ManagedChannel {
@@ -658,6 +929,25 @@ mod tests {
     }
 
     #[test]
+    fn programme_window_keeps_on_air_at_index_now() {
+        let now = try_parse_xmltv_time("20260101123000 +0000").unwrap();
+        let xml = r#"<?xml version="1.0"?>
+<tv>
+  <programme start="20260101120000 +0000" stop="20260101130000 +0000" channel="CNN.us">
+    <title>News Hour</title>
+  </programme>
+  <programme start="20260102120000 +0000" stop="20260102130000 +0000" channel="CNN.us">
+    <title>Tomorrow</title>
+  </programme>
+</tv>"#;
+        let rows = parse_xmltv_programmes(xml, now);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "News Hour");
+        assert_eq!(rows[0].2, "2026-01-01T12:00:00Z");
+        assert_eq!(rows[0].3, "2026-01-01T13:00:00Z");
+    }
+
+    #[test]
     fn cache_meta_freshness() {
         let mut m = EpgCacheMeta::default();
         assert!(!m.index_is_fresh(REFRESH_INTERVAL_SECS));
@@ -675,5 +965,27 @@ mod tests {
     fn gzip_magic() {
         assert!(looks_like_gzip(&[0x1f, 0x8b, 0x00]));
         assert!(!looks_like_gzip(b"<tv>"));
+    }
+
+    #[test]
+    fn read_capped_refuses_over_max() {
+        let data = vec![0u8; 32];
+        assert!(read_capped(Cursor::new(&data), 16).is_err());
+        assert_eq!(read_capped(Cursor::new(&data), 32).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn purge_oversized_xmltv_deletes_only_huge_guides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let keep = tmp.path().join("keep.xml");
+        let dropf = tmp.path().join("huge.xml");
+        let skip = tmp.path().join("notes.txt");
+        std::fs::write(&keep, b"<tv/>").unwrap();
+        std::fs::write(&dropf, vec![0u8; 64]).unwrap();
+        std::fs::write(&skip, b"x").unwrap();
+        assert_eq!(purge_oversized_xmltv_over(tmp.path(), 32), 1);
+        assert!(keep.is_file());
+        assert!(!dropf.is_file());
+        assert!(skip.is_file());
     }
 }

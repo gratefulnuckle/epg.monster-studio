@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::io::Read;
+
 use serde::{Deserialize, Serialize};
 
 use crate::curation::{self, CurationBuildResult};
@@ -189,6 +191,53 @@ fn send(
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Download the member curated XMLTV (or gzip) using the access key. Never logs the key.
+pub fn fetch_member_xml(
+    url: &str,
+    access_key: &str,
+    studio_version: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let key = access_key.trim();
+    if key.is_empty() {
+        return Err("Paste an access key from my.epg.monster → Keys (starts with epgm_).".into());
+    }
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("Upload channels.json first so my.epg.monster can build your curated EPG.".into());
+    }
+    let ua = user_agent(studio_version);
+    let resp = ureq::get(url)
+        .set("Authorization", &format!("Bearer {key}"))
+        .set("X-EPG-Member-Key", key)
+        .set("User-Agent", &ua)
+        .timeout(std::time::Duration::from_secs(90))
+        .call()
+        .map_err(|e| e.to_string())?;
+    let code = resp.status();
+    if !(200..300).contains(&code) {
+        return Err(format!("Curated EPG download failed (HTTP {code})."));
+    }
+    let mut raw = Vec::new();
+    resp.into_reader()
+        .take(64 * 1024 * 1024)
+        .read_to_end(&mut raw)
+        .map_err(|e| e.to_string())?;
+    let xml = if raw.len() >= 2 && raw[0] == 0x1f && raw[1] == 0x8b {
+        let mut out = Vec::new();
+        flate2::read::GzDecoder::new(raw.as_slice())
+            .read_to_end(&mut out)
+            .map_err(|e| e.to_string())?;
+        out
+    } else {
+        raw
+    };
+    let head = String::from_utf8_lossy(&xml[..xml.len().min(64)]).to_ascii_lowercase();
+    if !head.contains("<?xml") && !head.contains("<tv") {
+        return Err("Downloaded feed is not XMLTV.".into());
+    }
+    Ok(xml)
 }
 
 pub fn ping(api_base: &str, access_key: &str, studio_version: Option<&str>) -> MemberPingResult {
@@ -566,5 +615,18 @@ mod tests {
         let text = format_publish_report(&built, &result);
         assert!(text.contains("611 unknown tvg-id(s)"));
         assert!(!text.contains("30 unknown tvg-id(s)"));
+    }
+
+    #[test]
+    fn fetch_member_xml_refuses_empty_key() {
+        let err = fetch_member_xml("https://my.epg.monster/example.xml", "  ", None).unwrap_err();
+        assert!(err.contains("epgm_"));
+        assert!(!err.contains("epgm_test"));
+    }
+
+    #[test]
+    fn fetch_member_xml_refuses_empty_url() {
+        let err = fetch_member_xml("", "epgm_test", None).unwrap_err();
+        assert!(err.contains("channels.json"));
     }
 }

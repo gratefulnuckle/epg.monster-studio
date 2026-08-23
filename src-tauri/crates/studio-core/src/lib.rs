@@ -19,9 +19,11 @@ pub mod settings;
 pub mod store;
 pub mod tools;
 pub mod bootstrap;
+pub mod xtream;
 
 pub use info::{
-    display_version, github_open_studio_issues, latest_github_tag, DISPLAY_NAME, PRODUCT_ID,
+    display_version, github_open_studio_issues, latest_github_release, latest_github_tag,
+    remote_is_newer, DISPLAY_NAME, EDITION, GITHUB_RELEASES_LATEST, GITHUB_REPO, PRODUCT_ID,
     USER_AGENT, VERSION,
 };
 pub use models::{ChannelEntry, EpgSuggestion, ManagedChannel, NowPlaying, StreamVariant};

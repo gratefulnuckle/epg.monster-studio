@@ -1,11 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "epg.monster studio",
-  "version": "2.0.0",
+  "version": "2.0.2",
   "identifier": "monster.epg.studio",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -24,7 +24,8 @@
         "transparent": true,
         "shadow": false,
         "center": true,
-        "backgroundColor": "#00000000"
+        "visible": true,
+        "backgroundColor": "#0C0C10"
       }
     ],
     "security": {
@@ -33,10 +34,30 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
-    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "targets": ["deb", "appimage"],
+    "icon": ["icons/mascot.ico", "icons/mascot.png", "icons/icon.ico", "icons/icon.png"],
+    "resources": {
+      "windows/WebView2Loader.dll": "WebView2Loader.dll"
+    },
     "copyright": "GPL-3.0-or-later",
+    "category": "Utility",
     "shortDescription": "epg.monster studio",
-    "longDescription": "Windows desktop studio for curating IPTV playlists and presenting them as a local HDHomeRun tuner."
+    "longDescription": "Desktop studio for curating IPTV playlists and presenting them as a local HDHomeRun tuner.",
+    "windows": {
+      "nsis": {
+        "installMode": "both"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "ffmpeg"]
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
   }
 }

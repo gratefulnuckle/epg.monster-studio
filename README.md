@@ -1,58 +1,204 @@
-# epg.monster-studio(tauri)
+# epg.monster studio (v2)
 
-Exact **1:1 remake** of [gratefulnuckle/epg.monster-studio](https://github.com/gratefulnuckle/epg.monster-studio) (C# / .NET 10 / WinUI 3, **v1.0-beta**) as **Rust + TypeScript + Tauri v2**.
+**epg.monster studio** is a desktop app for curating IPTV playlists: load M3U/M3U8
+sources, edit a managed list with hidden backups, match EPG ids from epg.monster,
+probe streams with ffmpeg, and present the list to Plex / Jellyfin / Emby / TiviMate
+as a local HDHomeRun-style tuner.
 
-This is not a “similar playlist tool.” Every shipped surface, label, color, dialog, default, HTTP route, and SQLite row must match the Windows studio. The C# repo is the behavior oracle.
+This tree is the **v2** app: **Tauri v2 + Rust + TypeScript**, on **Windows, Linux,
+and macOS**. Window title is always **epg.monster studio**.
 
-**Product window title:** `epg.monster studio`  
-**Repo / project name:** `epg.monster-studio(tauri)`  
-**Folder:** `S:\Projects\epg.monster-studio-tauri` (also `C:\Users\jonat\Projects\...` via junction)  
-**License:** GNU GPL-3.0 (same as the source; ffmpeg/mpv notices in `THIRD_PARTY_NOTICES.md`)
+| | |
+|---|---|
+| Edition | `2026` |
+| Semver | `2.0.2` |
+| License | GPL-3.0 |
+| Releases | [gratefulnuckle/epg.monster-studio](https://github.com/gratefulnuckle/epg.monster-studio/releases) |
 
-## Status
+This is an operator tool. Use it only with sources you have the right to use.
 
-OpenSpec written. Tauri v2 + `studio-core` / `studio-tuner` scaffold and app shell are in progress on **S:** (C: is too small for Node/Rust builds).
+---
 
-Work the change:
+## Install (v2 testers)
 
-Work the change:
+v2 has **no Windows installer**. Launch in **dev mode** from the repo (data stays
+in that folder). Linux testers can install the **`.deb`** or run the **AppImage**.
+NSIS, Authenticode, signed `.dmg`, and OS AppData are **[v3](docs/V3.md)**.
 
-```text
-openspec/changes/1-1-tauri-remake/
+| OS | v2 | v3 (later) |
+|----|----|------------|
+| Windows | `.\studio.ps1` (dev) | NSIS + Authenticode |
+| Linux | `./studio.sh`, `.deb`, or AppImage | — |
+| macOS | `./studio.sh` | signed `.dmg` |
+
+### Dev (all platforms)
+
+Needs **Rust** (stable) and **Node 22+**.
+
+**Windows (PowerShell)**
+
+```powershell
+.\studio.ps1              # deps, release .exe, then start
+.\studio.ps1 --stop
+.\studio.ps1 --start
+.\studio.ps1 --restart
+.\studio.ps1 --install    # Node/Rust via winget; ffmpeg/mpv/VLC via scoop then winget; build the .exe
+.\studio.ps1 --shortcuts  # Desktop + Start Menu
+.\studio.ps1 --uninstall  # stop, remove shortcuts + launchable; optional tools (keeps .\data)
 ```
 
-Then `/opsx:apply` (or implement `tasks.md` by hand) and `/opsx:archive` when the remake matches the C# app.
+**Linux / macOS**
 
-## Source of truth
+```bash
+chmod +x studio.sh
+./studio.sh               # deps, release binary, then start
+./studio.sh --stop
+./studio.sh --start
+./studio.sh --restart
+./studio.sh --install     # Node, Rust, ffmpeg, mpv/VLC (apt/dnf/pacman or brew); build
+./studio.sh --shortcuts   # Desktop + applications menu
+./studio.sh --uninstall   # stop, remove shortcuts + launchable; optional tools (keeps ./data)
+```
 
-| What | Where |
-|------|--------|
-| Shipped Windows app | `S:\Projects\epg.monster-studio` · [github.com/gratefulnuckle/epg.monster-studio](https://github.com/gratefulnuckle/epg.monster-studio) |
-| Behavior contract | `openspec/changes/1-1-tauri-remake/` |
-| Project conventions | `openspec/project.md` |
-| Historical C# spec (outdated vs v1.0-beta) | source `docs/openspec/OpenSpec.md` |
-| Linux parity notes (useful UI inventory) | source `docs/openspec/linux-parity.md` |
+The script sets `EPG_MONSTER_HOME` to the repo so SQLite, logs, and cache are
+`./data`. **`--install`** checks Node, Rust, ffmpeg/ffprobe, mpv, VLC, and (on Linux)
+GTK/WebKit, prompts to install anything missing, then **builds a release launchable**
+next to the repo (`epg-monster-studio.exe` / `epg-monster-studio`). **`--shortcuts`**
+pins that file on the Desktop and in the Start Menu (Windows) or applications menu
+(Linux / macOS `~/Applications`). Splash still **checks** tools; it does not
+download them. ffmpeg is required; mpv and VLC are optional Play engines (not shipped).
 
-If a spec and the C# source disagree, **the shipped WinUI + Core code wins**. Update the spec; do not “improve” the product.
+**`--install` package managers**
+
+| OS | How missing tools are offered |
+|----|-------------------------------|
+| Windows | Scoop first (installs Scoop if you agree), then winget |
+| Linux | `apt-get`, `dnf`, or `pacman` — each step asks, then `sudo` |
+| macOS | Homebrew (installs brew if you agree). VLC is a brew cask |
+
+**`--uninstall`** stops the app and, with prompts, can remove shortcuts, the copied
+launchable, Node, Rust, ffmpeg, mpv, and VLC. **`./data` is never deleted.** G-houl
+Player is **v3**.
+
+Linux compile packages if you prefer apt yourself:
+
+```bash
+sudo apt install -y \
+  libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev \
+  librsvg2-dev patchelf ffmpeg
+```
+
+macOS: accept the Homebrew prompts from `--install`, or `brew install node rust ffmpeg mpv` and `brew install --cask vlc`.
+
+Tuner ports are **8080–8083**. UDP **65001** only if Settings → Advertise tuners is on.
+GNOME tray needs an AppIndicator extension; XFCE uses Status Tray.
+
+### Linux `.deb` and AppImage
+
+GitHub Actions on a `v2.*` tag builds the **`.deb`** and the **AppImage**.
+
+```bash
+sudo apt install ./epg.monster-studio_*.deb
+```
+
+```bash
+chmod +x epg.monster-studio_*.AppImage
+./epg.monster-studio_*.AppImage
+```
+
+The `.deb` depends on `ffmpeg`, `libwebkit2gtk-4.1-0`, `libgtk-3-0`. Data still
+goes next to the launch folder (`{app}/data`): the install prefix for the `.deb`,
+or the folder that contains the AppImage. Prefer the script if you want everything
+in the git checkout.
+
+---
+
+## Data folder
+
+v2 always uses **`{launch folder}/data`** (the repo when you use `studio.ps1` / `studio.sh`,
+or the directory that contains the binary). Never `%LocalAppData%`, never
+`~/.local/share`, never `~/Library/Application Support`. Those locations are v3.
+
+That folder holds `epg.monster-studio.db`, `auditprocess.db`, `logs/`, `logo/`,
+`offline-slates/`, `cache/`, `tool-cache/`.
+
+A manual copy of `epg.monster-studio.db` into `{launch}/data` still opens (same schema).
+
+Do not commit provider URLs, access keys, or that database.
+
+---
+
+## Update epg.monster studio
+
+Nav footer **Check For Updates** (above Settings):
+
+1. Reads the latest GitHub Release tag for this repo.
+2. If it is newer than the running `v2.0.2`, **Open GitHub release** installs
+   the matching `.deb` / AppImage (Linux) or you pull and run `studio.ps1` / `studio.sh`.
+3. If you are already current, or GitHub is unreachable / has no release yet
+   (including while this repo is private), the status line says so. It does not crash.
+
+Splash also checks when Settings → **Check for app updates on splash** is on.
+
+Silent in-app replace + relaunch is **v3** (updater signing key). Testers use
+`.\studio.ps1 --restart` / `./studio.sh --restart` or a new `.deb` / AppImage.
+
+---
+
+## Run from source
+
+Same as [Install (v2 testers)](#install-v2-testers): `.\studio.ps1` / `./studio.sh`.
+Equivalent: `npm run build` then `EPG_MONSTER_HOME=$(pwd) cargo run --features custom-protocol --manifest-path src-tauri/Cargo.toml`. On Windows add `--target x86_64-pc-windows-gnu`. That is the Rust `.exe` / binary with the UI in `dist/` — not a website, not `tauri dev`.
+
+Windows GNU rustc (no MSVC `link.exe`):
+
+```powershell
+cargo +stable-x86_64-pc-windows-gnu test -p studio-core
+```
+
+Default:
+
+```bash
+cd src-tauri
+cargo test -p studio-core
+```
+
+Linux `.deb` and AppImage locally:
+
+```bash
+npx tauri build --bundles deb,appimage
+```
+
+Windows NSIS and signed dmg are **[v3](docs/V3.md)**.
+
+---
+
+## GitHub Actions
+
+- `.github/workflows/ci.yml` — `cargo test -p studio-core` on Windows, Ubuntu, macOS.
+- `.github/workflows/release.yml` — on tag `v2.*` (or **Run workflow**), builds
+  the Linux **`.deb`** and **AppImage**. NSIS / dmg are v3.
+
+Create a release:
+
+```bash
+git tag v2.0.2
+git push origin v2.0.2
+```
+
+---
 
 ## What the studio does
 
-Windows desktop tool for curating IPTV playlists: load M3U/M3U8 sources, edit a managed list with hidden backups, match EPG ids from epg.monster XMLTV, probe streams with ffmpeg, and present the list to Plex / Jellyfin / Emby / TiviMate as a local HDHomeRun-style tuner.
+| Section | What it does |
+|---------|----------------|
+| **Add Sources** | Load file or URL playlists. Search by name and tvg-id. Add a row or a hidden backup. |
+| **Playlist Editor** | Curated channels, visible stream + backups, export. |
+| **EPG Audit** | epg.monster XMLTV catalog, match tvg-ids. |
+| **Logo Audit** | Missing/broken logos. Save a local PNG pack. |
+| **Stream Audit** | Serial ffmpeg/ffprobe probes. Auto-swap. Weekly groups. |
+| **Managed Output** | Export, tuner lineup, upload channels.json (ids only — never stream URLs). |
+| **TV Tuner** | Plex / Jellyfin / Emby / IPTV. Ports 8080–8083. |
+| **Check For Updates** | GitHub Releases latest vs this 2026 edition build. |
+| **Settings** | Players, ffmpeg, members key, remux, weekly audit, splash update check. |
 
-## Stack (locked)
-
-| Layer | Choice |
-|-------|--------|
-| Shell | Tauri v2 |
-| Backend | Rust (port of `EpgMonsterStudio.Core`) |
-| Frontend | TypeScript |
-| Database | Same SQLite schema + same AppData path |
-| Tools | Bundled portable ffmpeg + mpv (Windows) |
-
-## Data compatibility
-
-The remake **must** open an existing `%LocalAppData%\epg.monster-studio\epg.monster-studio.db` from the C# app without migration. Same folder, same tables, same settings JSON keys.
-
-## License
-
-GNU GPL v3.0. A 1:1 remake of a GPL-3.0 application is GPL-3.0.

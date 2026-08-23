@@ -117,40 +117,103 @@ pub fn is_player_safe_image(b: &[u8]) -> bool {
     false
 }
 
-pub fn probe_url(url: &str) -> LogoCheck {
+pub struct LogoBody {
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
+fn sniff_mime(bytes: &[u8]) -> &'static str {
+    if bytes.len() >= 4 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 {
+        return "image/png";
+    }
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return "image/jpeg";
+    }
+    "image/gif"
+}
+
+fn b64(data: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    let mut i = 0;
+    while i < data.len() {
+        let b0 = data[i];
+        let b1 = if i + 1 < data.len() { data[i + 1] } else { 0 };
+        let b2 = if i + 2 < data.len() { data[i + 2] } else { 0 };
+        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | b2 as u32;
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        out.push(if i + 1 < data.len() { T[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if i + 2 < data.len() { T[(n & 63) as usize] as char } else { '=' });
+        i += 3;
+    }
+    out
+}
+
+/// Same GET a player / the probe uses (VLC UA, no Origin/Referer).
+pub fn fetch_logo_body(url: &str) -> Result<LogoBody, LogoCheck> {
     let classified = classify_url(url);
     if !classified.is_ok() {
-        return classified;
+        return Err(classified);
     }
     match ureq::get(url)
         .set("User-Agent", PLAYER_UA)
         .set("Accept", "image/png,image/jpeg,image/gif,*/*")
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(4))
         .call()
     {
         Ok(resp) => {
             let status = resp.status();
             if !(200..300).contains(&status) {
-                return reject(&format!(
+                return Err(reject(&format!(
                     "Players got HTTP {status}. TiviMate/Plex/tuners use a simple GET (this probe uses {PLAYER_UA})."
-                ));
+                )));
             }
             let media = resp.content_type().to_ascii_lowercase();
             if media.contains("svg") {
-                return reject("Server sent SVG. Most players skip SVG.");
+                return Err(reject("Server sent SVG. Most players skip SVG."));
             }
             if media.contains("html") || media.contains("json") {
-                return reject("URL returned a page, not an image file.");
+                return Err(reject("URL returned a page, not an image file."));
             }
-            let mut buf = [0u8; 16];
-            let n = resp.into_reader().read(&mut buf).unwrap_or(0);
-            if !is_player_safe_image(&buf[..n]) {
-                return reject("Bytes are not PNG/JPEG/GIF. Players will skip WebP, SVG, ICO, and HTML.");
+            let mut bytes = Vec::new();
+            let n = resp
+                .into_reader()
+                .take(2 * 1024 * 1024)
+                .read_to_end(&mut bytes)
+                .unwrap_or(0);
+            bytes.truncate(n);
+            if !is_player_safe_image(&bytes) {
+                return Err(reject(
+                    "Bytes are not PNG/JPEG/GIF. Players will skip WebP, SVG, ICO, and HTML.",
+                ));
             }
-            LogoCheck::ok()
+            Ok(LogoBody {
+                mime: sniff_mime(&bytes).into(),
+                bytes,
+            })
         }
-        Err(e) => reject(&format!("Fetch failed the way a player would: {e}")),
+        Err(e) => Err(reject(&format!("Fetch failed the way a player would: {e}"))),
     }
+}
+
+pub fn probe_url(url: &str) -> LogoCheck {
+    match fetch_logo_body(url) {
+        Ok(_) => LogoCheck::ok(),
+        Err(c) => c,
+    }
+}
+
+/// data: URL for WebView display — same bytes the probe fetched (bypasses CDN hotlink/Origin blocks).
+pub fn preview_data_url(url: &str) -> Result<String, String> {
+    let body = fetch_logo_body(url).map_err(|c| {
+        if c.reason.is_empty() {
+            c.issue.unwrap_or_else(|| "broken".into())
+        } else {
+            c.reason
+        }
+    })?;
+    Ok(format!("data:{};base64,{}", body.mime, b64(&body.bytes)))
 }
 
 pub fn issue_label(issue: Option<&str>) -> &'static str {
@@ -206,7 +269,7 @@ pub fn hosted_url(tuner_base: &str, tvg_id: &str) -> String {
     format!("{}{}", tuner_base.trim_end_matches('/'), hosted_path(tvg_id))
 }
 
-/// C# LogoSaver.PlaylistLogo — local tuner logos replace tvg-logo when asked.
+/// Local tuner logos replace tvg-logo when the operator asks to use hosted paths.
 pub fn playlist_logo(ch: &ManagedChannel, tuner_base: &str, use_local: bool) -> Option<String> {
     if !use_local || ch.tvg_id.as_deref().unwrap_or("").trim().is_empty() {
         return ch
@@ -415,7 +478,7 @@ pub fn plan_save(channels: &[ManagedChannel], root: &Path) -> Vec<LogoSaveItem> 
             ("skip".into(), Some(check.reason))
         };
         if dest.exists() {
-            status = "saved".into();
+            status = "cached".into();
             err = None;
         } else if let Some(prev) = tracker.get(&tvg.to_ascii_lowercase()) {
             if prev != "saved" {
@@ -442,6 +505,15 @@ pub fn plan_save(channels: &[ManagedChannel], root: &Path) -> Vec<LogoSaveItem> 
         });
     }
     items
+}
+
+/// Skip rewrite when a cached PNG is already on disk at the same byte length.
+pub fn skip_cached_same_size(dest: &Path, download_len: u64) -> bool {
+    dest.is_file()
+        && dest
+            .metadata()
+            .map(|m| m.len() == download_len)
+            .unwrap_or(false)
 }
 
 pub fn save_one(item: &mut LogoSaveItem, ffmpeg_path: &str) {
@@ -484,21 +556,40 @@ pub fn save_one(item: &mut LogoSaveItem, ffmpeg_path: &str) {
                 item.error = Some("temp write failed".into());
                 return;
             }
+            let dest = Path::new(&item.dest_path);
             let png_magic = bytes.len() >= 4 && bytes[0] == 0x89 && bytes[1] == 0x50;
             if png_magic {
-                if std::fs::copy(&tmp, &item.dest_path).is_ok() {
+                if skip_cached_same_size(dest, bytes.len() as u64) {
+                    item.status = "skip".into();
+                    item.error = None;
+                } else if std::fs::copy(&tmp, dest).is_ok() {
                     item.status = "saved".into();
                     item.error = None;
                 } else {
                     item.status = "failed".into();
                     item.error = Some("write failed".into());
                 }
-            } else if convert_png(ffmpeg_path, &tmp, Path::new(&item.dest_path)) {
-                item.status = "saved".into();
-                item.error = None;
             } else {
-                item.status = "failed".into();
-                item.error = Some("ffmpeg could not convert to PNG".into());
+                let converted = dest.with_extension("png.tmp");
+                if convert_png(ffmpeg_path, &tmp, &converted) {
+                    let n = converted.metadata().map(|m| m.len()).unwrap_or(0);
+                    if skip_cached_same_size(dest, n) {
+                        item.status = "skip".into();
+                        item.error = None;
+                    } else if std::fs::rename(&converted, dest).is_ok()
+                        || std::fs::copy(&converted, dest).is_ok()
+                    {
+                        item.status = "saved".into();
+                        item.error = None;
+                    } else {
+                        item.status = "failed".into();
+                        item.error = Some("write failed".into());
+                    }
+                    let _ = std::fs::remove_file(&converted);
+                } else {
+                    item.status = "failed".into();
+                    item.error = Some("ffmpeg could not convert to PNG".into());
+                }
             }
             let _ = std::fs::remove_file(&tmp);
         }
@@ -586,6 +677,7 @@ mod tests {
         let c = classify_url("https://upload.wikimedia.org/wikipedia/commons/c/cf/Brazzers_logo.png");
         assert_eq!(c.issue.as_deref(), Some("player-reject"));
         assert!(c.reason.to_ascii_lowercase().contains("wikimedia"));
+        assert!(preview_data_url("https://upload.wikimedia.org/wikipedia/commons/x.png").is_err());
     }
 
     #[test]
@@ -650,6 +742,44 @@ mod tests {
     fn dest_is_group_tvgid_png() {
         let p = dest_path(Path::new("/logo"), "NEWS", "CNN.us");
         assert!(p.ends_with(Path::new("news").join("cnn.us.png")));
+    }
+
+    fn sample_channel() -> crate::models::ManagedChannel {
+        crate::models::ManagedChannel {
+            id: "1".into(),
+            name: "CNN".into(),
+            group_title: "NEWS".into(),
+            tvg_id: Some("CNN.us".into()),
+            tvg_logo: Some("https://cdn.example/cnn.png".into()),
+            notes: None,
+            sort_order: 0,
+            tvg_shift_hours: 0.0,
+            in_tuner: false,
+            tuner_number: None,
+            variants: Vec::new(),
+            has_epg_match: false,
+        }
+    }
+
+    #[test]
+    fn plan_save_marks_existing_file_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dest_path(dir.path(), "NEWS", "CNN.us");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, b"cached-png").unwrap();
+        let items = plan_save(&[sample_channel()], dir.path());
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].status, "cached");
+    }
+
+    #[test]
+    fn skip_cached_when_size_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dest_path(dir.path(), "NEWS", "CNN.us");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, b"12345678").unwrap();
+        assert!(skip_cached_same_size(&dest, 8));
+        assert!(!skip_cached_same_size(&dest, 99));
     }
 
     #[test]

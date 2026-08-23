@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::info::PRODUCT_ID;
 use crate::paths::{app_data_directory, crashes_directory, current_log_path};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,7 +30,7 @@ fn pending_crash_path() -> PathBuf {
 
 pub fn write_session_lock(state: &str) {
     let body = format!(
-        "pid={}\nstarted={}\nstate={}\nexe={}\nbase={}\n",
+        "product={PRODUCT_ID}\npid={}\nstarted={}\nstate={}\nexe={}\nbase={}\n",
         std::process::id(),
         crate::audit::now_iso(),
         state,
@@ -73,6 +74,9 @@ pub fn write_crash_report(kind: &str, title: &str, summary: &str, details: &str,
     let base = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
+    let title = crate::issue::redact(title);
+    let summary = crate::issue::redact(summary);
+    let details = crate::issue::redact(details);
     let body = format!(
         "epg.monster studio crash report\n\
 ========================\n\
@@ -93,9 +97,9 @@ Details / stack\n\
 {details}\n\n\
 Recent notes\n\
 ------------\n\
-If Kind=native: this was likely an access violation (segfault) in native code\n\
-(WinUI, graphics, SQLite native, ffmpeg child, etc.). Check minidump-*.dmp in this folder.\n\
-If Kind=managed: the stack above is the managed .NET exception path.\n\
+If Kind=native: this was likely a fault in native code\n\
+(WebView, graphics, SQLite, ffmpeg child, etc.). Check minidump-*.dmp in this folder.\n\
+If Kind=js: the stack above is a WebView / TypeScript exception.\n\
 If Kind=unclean: the process vanished without an exception report.\n",
         std::process::id(),
         std::env::consts::OS,
@@ -132,6 +136,11 @@ pub fn consume_pending_crash() -> Option<CrashReport> {
     let lock = session_lock_path();
     if lock.is_file() {
         let text = fs::read_to_string(&lock).unwrap_or_default();
+        if !text.contains(&format!("product={PRODUCT_ID}")) {
+            let _ = fs::remove_file(&lock);
+            write_session_lock("running");
+            return None;
+        }
         let prior = parse_pid(&text);
         let mut unclean = true;
         if prior == Some(std::process::id()) {
@@ -302,8 +311,60 @@ pub fn append_log(level: &str, source: &str, message: &str) {
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(
             f,
-            "{} [{level}] [{source}] {message}",
-            crate::audit::now_iso()
+            "{} [{level}] [{source}] {}",
+            crate::audit::now_iso(),
+            crate::issue::redact(message)
         );
     }
+}
+
+/// Release builds have no console (`windows_subsystem = "windows"`). Show a
+/// native dialog and write a crash report instead of `expect` before the window.
+pub fn startup_fatal(summary: &str, details: &str) -> ! {
+    append_log("Fatal", "Startup", summary);
+    let _ = write_crash_report(
+        "native",
+        "epg.monster studio failed to start",
+        summary,
+        details,
+        "Startup",
+    );
+    native_error_dialog("epg.monster studio", &format!("{summary}\n\n{details}"));
+    std::process::exit(1);
+}
+
+fn native_error_dialog(title: &str, text: &str) {
+    eprintln!("{title}: {text}");
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        const MB_ICONERROR: u32 = 0x0000_0010;
+        let wide = |s: &str| {
+            std::ffi::OsStr::new(s)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>()
+        };
+        let t = wide(text);
+        let c = wide(title);
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                t.as_ptr(),
+                c.as_ptr(),
+                MB_ICONERROR,
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn MessageBoxW(
+        hwnd: *mut core::ffi::c_void,
+        text: *const u16,
+        caption: *const u16,
+        flags: u32,
+    ) -> i32;
 }
