@@ -66,6 +66,7 @@ export function tunerHtml(): string {
         <div class="tn-landing-row tn-landing-row-iptv" id="tn-row-iptv"></div>
       </div>
       <label class="check tn-disco"><input type="checkbox" id="tn-disco" /> Advertise tuners on the network (HDHomeRun UDP 65001 + SSDP). Turn on Allow LAN if Plex is another PC.</label>
+      <p class="page-sub">Advertise + Allow LAN: any device on the LAN can hit the tuner HTTP ports. There is no password. Default bind is loopback until Allow LAN is on.</p>
     </div>
     <div id="tn-view-detail" class="editor-workspace" hidden>
       <div class="tabs-row">
@@ -89,6 +90,7 @@ export function tunerHtml(): string {
           <div class="field"><label>Port</label><input id="tn-port" type="number" /></div>
           <div class="field"><label>Tuner count</label><input id="tn-count" type="number" min="1" max="16" /></div>
           <label class="check"><input type="checkbox" id="tn-lan" /> Allow LAN</label>
+          <p class="page-sub" id="tn-lan-warn">Trusted LAN only. Binds 0.0.0.0 with no client auth. For IPTV, keep remux on so the playlist stays on Studio URLs (remux off lists provider stream URLs).</p>
           <div id="tn-jelly-extra" hidden>
             <label class="check"><input type="checkbox" id="tn-down" /> Downspiral — one playlist + guide per group (switch lists without changing Jellyfin profiles)</label>
           </div>

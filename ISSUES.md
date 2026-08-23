@@ -15,12 +15,12 @@ Historical freezes from 2026-08-18 are below. **Live leftovers** (after the 2026
 
 | Item | Status |
 |------|--------|
-| GitHub `gratefulnuckle/epg.monster-studio` | **private** until walkthrough |
+| GitHub `gratefulnuckle/epg.monster-studio` | **public** (GPL-3.0) — https://github.com/gratefulnuckle/epg.monster-studio |
 | NSIS / Authenticode / OS AppData | **v3** — see `docs/V3.md` |
 | P1-7 close → tray | by design |
 | P1-10 GNU dual RT_MANIFEST | **fixed** — MinGW `default-manifest.o` shadowed so Tauri's is the only RT_MANIFEST |
 
-Need a **new `tauri dev` / NSIS binary** to pick up source fixes. GitHub push is later.
+Need a new `studio.ps1 --install` / `--restart` binary to pick up source fixes.
 
 ---
 

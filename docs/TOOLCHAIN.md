@@ -33,3 +33,20 @@ cargo test --manifest-path src-tauri/Cargo.toml -p studio-core -p studio-tuner
 ```
 
 On Windows GNU add `--target x86_64-pc-windows-gnu` and the same PATH as above.
+
+## WebView2Loader.dll (Windows GNU)
+
+Tauri on GNU Windows needs `WebView2Loader.dll` next to the exe. The copy in
+`src-tauri/windows/WebView2Loader.dll` is vendored and listed in
+`tauri.conf.json` `bundle.resources` so `--install` / `cargo build` places it
+beside `epg-monster-studio.exe`.
+
+Update it only when bumping the WebView2 / Tauri Windows loader:
+
+1. Take the x64 `WebView2Loader.dll` from the matching Evergreen Bootstrapper
+   or the Tauri Windows GNU build output.
+2. Replace `src-tauri/windows/WebView2Loader.dll`.
+3. Record size + SHA-256 in the commit message (`Get-FileHash` on PowerShell).
+4. Smoke-launch `.\studio.ps1 --start` so the window still opens.
+
+Do not commit a different arch (ARM64 / x86).

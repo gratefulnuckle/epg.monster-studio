@@ -118,6 +118,7 @@ export function settingsHtml(): string {
         <div class="field"><label>Email</label><input id="set-email" placeholder="you@example.com" /></div>
         <div class="field"><label>Access key (epgm_…)</label><input id="set-key" type="password" /></div>
         <div class="field"><label>API base</label><input id="set-api" placeholder="https://epg.monster" /></div>
+        <p class="page-sub" id="set-api-warn" hidden>This host is not epg.monster / my.epg.monster / localhost. Saving or testing will send your access key there.</p>
         <div>
           <button id="set-test">Test key</button>
           <button class="accent" id="set-upload">Upload channels.json</button>
@@ -181,6 +182,16 @@ export function settingsHtml(): string {
         <div class="field"><label>Optional Python path</label><input id="set-py" placeholder="python.exe" /></div>
       </section>
     </div>
+    <div class="dialog-backdrop" id="set-api-dlg">
+      <div class="dialog">
+        <h2>Unofficial members API host</h2>
+        <p class="page-sub" id="set-api-dlg-msg"></p>
+        <div class="dialog-actions">
+          <button type="button" id="set-api-no">Cancel</button>
+          <button type="button" class="accent" id="set-api-yes">Save anyway</button>
+        </div>
+      </div>
+    </div>
   `;
 }
 
@@ -189,6 +200,26 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
   let folders = { logs: "", crashes: "", slates: "", currentLog: "", logoDir: "" };
   let selectedSlate = "";
 
+  const officialMemberHost = (base: string) => {
+    try {
+      const raw = base.trim() || "https://epg.monster";
+      const u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`);
+      const h = u.hostname.toLowerCase();
+      return (
+        h === "epg.monster" ||
+        h === "my.epg.monster" ||
+        h === "localhost" ||
+        h === "127.0.0.1" ||
+        h === "::1"
+      );
+    } catch {
+      return false;
+    }
+  };
+  const paintApiWarn = () => {
+    const warn = page.querySelector<HTMLElement>("#set-api-warn");
+    if (warn) warn.hidden = officialMemberHost(val("set-api"));
+  };
   const $ = <T extends HTMLElement>(id: string) => page.querySelector<T>(`#${id}`)!;
   const val = (id: string) => (page.querySelector(`#${id}`) as HTMLInputElement).value;
   const setVal = (id: string, v: string) => {
@@ -355,9 +386,10 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
     setChk("set-hostlogos", !!st.HostLogosOnTuner);
     setChk("set-locallogos", !!st.UseLocalLogos);
     setVal("set-py", st.PythonPath ?? "");
+    paintApiWarn();
   };
 
-  page.querySelector("#save-settings")!.addEventListener("click", async () => {
+  const doSave = async () => {
     try {
       const next = collect();
       await invoke("save_settings", { settings: next });
@@ -385,7 +417,26 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
     } catch (e) {
       toast(String(e));
     }
+  };
+  const apiDlg = page.querySelector("#set-api-dlg")!;
+  page.querySelector("#save-settings")!.addEventListener("click", () => {
+    paintApiWarn();
+    if (officialMemberHost(val("set-api"))) {
+      void doSave();
+      return;
+    }
+    const msg = page.querySelector("#set-api-dlg-msg");
+    if (msg) {
+      msg.textContent = `API base “${val("set-api").trim() || "(empty)"}” is not epg.monster, my.epg.monster, or localhost. Studio will send your access key to that host.`;
+    }
+    apiDlg.classList.add("open");
   });
+  page.querySelector("#set-api-no")!.addEventListener("click", () => apiDlg.classList.remove("open"));
+  page.querySelector("#set-api-yes")!.addEventListener("click", () => {
+    apiDlg.classList.remove("open");
+    void doSave();
+  });
+  page.querySelector("#set-api")?.addEventListener("input", paintApiWarn);
 
   page.querySelector("#detect-tools")!.addEventListener("click", async () => {
     try {
@@ -401,6 +452,10 @@ export async function mountSettings(page: HTMLElement, toast: (s: string) => voi
   });
 
   page.querySelector("#set-test")!.addEventListener("click", async () => {
+    paintApiWarn();
+    if (!officialMemberHost(val("set-api"))) {
+      toast("API base is not an official epg.monster host. Testing will send the key there.");
+    }
     const key = val("set-key").trim() || s?.MemberAccessKey || "";
     $("set-member-status").textContent = "Testing…";
     let ping: Ping;

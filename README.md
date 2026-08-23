@@ -21,9 +21,11 @@ This is an operator tool. Use it only with sources you have the right to use.
 
 ## Install (v2 testers)
 
-v2 has **no Windows installer**. Launch in **dev mode** from the repo (data stays
-in that folder). Linux testers can install the **`.deb`** or run the **AppImage**.
-NSIS, Authenticode, signed `.dmg`, and OS AppData are **[v3](docs/V3.md)**.
+v2 has **no Windows installer**. Clone the **public** repo and launch from source
+(data stays in that folder). Linux testers can run `./studio.sh` now; **`.deb` /
+AppImage** attach on GitHub Actions when a `v2.*` tag is pushed (`release.yml`).
+`v2.0.2` is the source release (Check For Updates). NSIS, Authenticode, signed
+`.dmg`, and OS AppData are **[v3](docs/V3.md)**.
 
 | OS | v2 | v3 (later) |
 |----|----|------------|
@@ -135,8 +137,8 @@ Nav footer **Check For Updates** (above Settings):
 1. Reads the latest GitHub Release tag for this repo.
 2. If it is newer than the running `v2.0.2`, **Open GitHub release** installs
    the matching `.deb` / AppImage (Linux) or you pull and run `studio.ps1` / `studio.sh`.
-3. If you are already current, or GitHub is unreachable / has no release yet
-   (including while this repo is private), the status line says so. It does not crash.
+3. If you are already current, or GitHub is unreachable / has no release yet,
+   the status line says so. It does not crash. The repo is **public**.
 
 Splash also checks when Settings → **Check for app updates on splash** is on.
 
@@ -175,16 +177,20 @@ Windows NSIS and signed dmg are **[v3](docs/V3.md)**.
 
 ## GitHub Actions
 
-- `.github/workflows/ci.yml` — `cargo test -p studio-core` on Windows, Ubuntu, macOS.
+- `.github/workflows/ci.yml` — `cargo test -p studio-core` on Windows, Ubuntu, macOS (`master`).
 - `.github/workflows/release.yml` — on tag `v2.*` (or **Run workflow**), builds
-  the Linux **`.deb`** and **AppImage**. NSIS / dmg are v3.
+  the Linux **`.deb`** and **AppImage** and attaches them to the GitHub Release.
+  NSIS / dmg are v3. Tag `v2.0.2` is the source release (Check For Updates);
+  Linux packages attach on the next `v2.*` tag after this workflow is on GitHub.
 
 Create a release:
 
 ```bash
-git tag v2.0.2
-git push origin v2.0.2
+git tag v2.0.3
+git push origin v2.0.3
 ```
+
+LAN / Advertise trust model: [docs/LAN.md](docs/LAN.md).
 
 ---
 

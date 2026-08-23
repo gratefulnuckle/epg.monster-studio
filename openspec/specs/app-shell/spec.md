@@ -47,7 +47,7 @@ The system SHALL provide a left pane 220px wide with a clickable logo (About) an
 - AND the tooltip is `About epg.monster studio`
 
 ### Requirement: Check For Updates
-The system SHALL show **Check For Updates** in the nav footer above Settings. Opening it queries GitHub Releases for this repo and reports current vs latest without crashing if the repo is private or has no release yet.
+The system SHALL show **Check For Updates** in the nav footer above Settings. Opening it queries GitHub Releases for this **public** repo and reports current vs latest without crashing if GitHub is unreachable or has no release yet.
 
 #### Scenario: Check on open
 - GIVEN the operator opens Check For Updates
