@@ -7,9 +7,11 @@
 [![Language](https://img.shields.io/badge/language-TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Tauri](https://img.shields.io/badge/Tauri-v2-FFC131?style=for-the-badge&logo=tauri&logoColor=black)](https://tauri.app/)
+
 [![Windows](https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://learn.microsoft.com/windows/)
 [![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://www.kernel.org/)
 [![macOS](https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white)](https://www.apple.com/macos/)
+
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=for-the-badge)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/gratefulnuckle/epg.monster-studio?style=for-the-badge)](https://github.com/gratefulnuckle/epg.monster-studio/releases)
 
@@ -27,12 +29,6 @@ This is an operator tool. Use it only with sources you have the right to use.
 ---
 
 ## Install (v2 testers)
-
-v2 has **no Windows installer**. Clone the **public** repo and launch from source
-(data stays in that folder). Linux testers can run `./studio.sh` now; **`.deb` /
-AppImage** attach on GitHub Actions when a `v2.*` tag is pushed (`release.yml`).
-`v2.0.2` is the source release (Check For Updates). NSIS, Authenticode, signed
-`.dmg`, and OS AppData are **[v3](docs/V3.md)**.
 
 | OS | v2 | v3 (later) |
 |----|----|------------|
@@ -130,10 +126,6 @@ or the directory that contains the binary). Never `%LocalAppData%`, never
 
 That folder holds `epg.monster-studio.db`, `auditprocess.db`, `logs/`, `logo/`,
 `offline-slates/`, `cache/`, `tool-cache/`.
-
-A manual copy of `epg.monster-studio.db` into `{launch}/data` still opens (same schema).
-
-Do not commit provider URLs, access keys, or that database.
 
 ---
 
