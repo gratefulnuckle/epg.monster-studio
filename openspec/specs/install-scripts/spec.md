@@ -113,12 +113,22 @@ be appended. Native `info:` / rustup sync MUST NOT abort the script.
 
 ### Requirement: UI
 
-Windows `--install` / `--uninstall` SHALL use two panes: static top (header box
-**epg.monster studio**, edition line, steps, Y/n, `CTRL+Q to QUIT`) and a bottom
-stdout pane separated by a line. Header box is double-line `╔═╗` / `╚═╝`, one
-color, sized to the title text, not scrolled off by log output.
+`--install` / `--uninstall` on Windows, Linux, and macOS SHALL use two panes:
+static top (header box **epg.monster studio**, edition line, a pre-seeded step
+table, Y/n, `CTRL+Q to QUIT`) and a bottom stdout pane separated by a line.
+Header box is double-line `╔═╗` / `╚═╝`, one color, sized to the title text.
+Step rows are a fixed grid (tag, 12-char name, 16-char state, clipped detail).
+Every painted line is one terminal row: no wrap, and log output MUST NOT scroll
+the header off the screen.
 
 `CTRL+Q` quits. `./data` is never deleted.
+
+#### Scenario: Linux install grid is fixed
+- GIVEN a Linux `--install`
+- WHEN the first paint runs
+- THEN the top pane already lists Node.js, Rust, cc, WebKitGTK, ffmpeg, ffprobe,
+  mpv, VLC, npm, data, UI build, cargo, and launchable
+- AND later tools update those rows instead of inserting new ones
 
 ### Requirement: Linux and macOS
 

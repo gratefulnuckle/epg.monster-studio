@@ -38,8 +38,8 @@ On Windows GNU add `--target x86_64-pc-windows-gnu` and the same PATH as above.
 
 Tauri on GNU Windows needs `WebView2Loader.dll` next to the exe. The copy in
 `src-tauri/windows/WebView2Loader.dll` is vendored and listed in
-`tauri.conf.json` `bundle.resources` so `--install` / `cargo build` places it
-beside `epg-monster-studio.exe`.
+`tauri.windows.conf.json` `bundle.resources` so `--install` / `cargo build` places
+it beside `epg-monster-studio.exe`. Linux `.deb` / AppImage do not ship that DLL.
 
 Update it only when bumping the WebView2 / Tauri Windows loader:
 

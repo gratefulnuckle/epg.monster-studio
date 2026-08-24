@@ -1,3 +1,4 @@
-# Keep Rust artifacts off C:.
+# Keep Rust artifacts off C: on Windows GNU.
+# studio.sh sets CARGO_TARGET_DIR on Linux/macOS so this path is not used.
 [build]
 target-dir = "S:\\toolchains\\cargo-target\\epg-monster-studio"

@@ -35,12 +35,20 @@
   "bundle": {
     "active": true,
     "targets": ["deb", "appimage"],
-    "icon": ["icons/mascot.ico", "icons/mascot.png", "icons/icon.ico", "icons/icon.png"],
-    "resources": {
-      "windows/WebView2Loader.dll": "WebView2Loader.dll"
-    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/256x256.png",
+      "icons/mascot.ico",
+      "icons/mascot.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
     "copyright": "GPL-3.0-or-later",
     "category": "Utility",
+    "homepage": "https://epg.monster",
+    "licenseFile": "../LICENSE",
+    "publisher": "epg.monster",
     "shortDescription": "epg.monster studio",
     "longDescription": "Desktop studio for curating IPTV playlists and presenting them as a local HDHomeRun tuner.",
     "windows": {
@@ -50,7 +58,15 @@
     },
     "linux": {
       "deb": {
-        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "ffmpeg"]
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "ffmpeg",
+          "libayatana-appindicator3-1 | libappindicator3-1"
+        ],
+        "recommends": ["mpv", "vlc"],
+        "section": "utils",
+        "desktopTemplate": "linux/epg.monster-studio.desktop"
       },
       "appimage": {
         "bundleMediaFramework": false

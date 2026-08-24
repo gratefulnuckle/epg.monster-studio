@@ -32,6 +32,11 @@ minidump-*.dmp
 /epg-monster-studio
 /WebView2Loader.dll
 
+# Local Linux packages (GitHub Release attaches these; do not commit)
+*.deb
+*.AppImage
+/dist-linux/
+
 # Bundled / fetched binaries
 tools/ffmpeg/
 tools/mpv/
@@ -51,3 +56,4 @@ ghoul/
 **/.fingerprint/
 **/incremental/
 **/.cargo-artifact-lock
+/S:*/

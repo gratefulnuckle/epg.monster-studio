@@ -3,13 +3,22 @@
 # (EPG_MONSTER_HOME). NSIS / Authenticode are v3.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIDFILE="$ROOT/.studio-dev.pid"
 LAUNCHABLE="$ROOT/epg-monster-studio"
 ICON_PNG="$ROOT/src-tauri/icons/mascot.png"
 TOOL_STATE="$ROOT/.studio-install.json"
 export EPG_MONSTER_HOME="$ROOT"
 cd "$ROOT"
+# .cargo/config.toml pins a Windows S:\ path so GNU artifacts stay off C:.
+# On Unix that string is a literal folder in the repo; override it.
+case "$(uname -s)" in
+  Linux|Darwin)
+    if [[ -z "${CARGO_TARGET_DIR:-}" || "$CARGO_TARGET_DIR" == [A-Za-z]:* || "$CARGO_TARGET_DIR" == *\\* ]]; then
+      export CARGO_TARGET_DIR="$ROOT/src-tauri/target"
+    fi
+    ;;
+esac
 PKG=""
 APT_UPDATED=0
 ACTION_LOG=""
@@ -73,7 +82,7 @@ USE_SPLIT=0
 PROMPT_TEXT=""
 LOG_LINES=()
 STTY_ORIG=""
-if [[ -t 0 ]]; then
+if [[ "${BASH_SOURCE[0]}" == "$0" && -t 0 ]]; then
   STTY_ORIG="$(stty -g 2>/dev/null || true)"
   stty -ixon 2>/dev/null || true
 fi
@@ -92,20 +101,130 @@ quit_ui() {
   exit 0
 }
 
-pane_top() {
-  local h top need
-  h="$(term_rows)"
-  if [[ "$USE_SPLIT" -eq 0 ]]; then
-    echo "$h"
+# Visible cell: flatten CR/LF, ellipsis if too long, pad to width. Never wraps.
+clip_text() {
+  local text="$1" width="$2" n
+  text="${text//$'\r'/}"
+  text="${text//$'\n'/ }"
+  n=${#text}
+  if (( width < 1 )); then
     return 0
   fi
-  top=$((h / 2))
-  need=$((16 + ${#UI_KEYS[@]} * 2))
+  if (( n > width )); then
+    if (( width == 1 )); then
+      printf '%s' "${text:0:1}"
+    else
+      printf '%s…' "${text:0:$((width - 1))}"
+    fi
+  else
+    printf '%s%*s' "$text" "$((width - n))" ""
+  fi
+}
+
+step_line_text() {
+  local name="$1" state="$2" detail="${3:-}" kind="$4" tag
+  case "$kind" in
+    ok) tag="[ ok ]" ;;
+    skip) tag="[ -- ]" ;;
+    warn) tag="[ !! ]" ;;
+    fail) tag="[ XX ]" ;;
+    *) tag="[ .. ]" ;;
+  esac
+  printf '  %s  %s  %s  %s' "$tag" "$(clip_text "$name" 12)" "$(clip_text "$state" 16)" "$detail"
+}
+
+# Prints: TOP LOG. TOP + 2 + LOG = HEIGHT. Log pane at least 6 rows.
+pane_layout() {
+  local h="$1" row_n="$2"
+  local need=$((4 + 3 + 2 + row_n + 3))
+  local top=$((h / 2))
+  local log
   if (( need > top )); then top=$need; fi
-  if (( top > h - 6 )); then top=$((h - 6)); fi
+  if (( top > h - 8 )); then top=$((h - 8)); fi
+  log=$((h - top - 2))
+  if (( log < 6 )); then
+    log=6
+    top=$((h - 8))
+  fi
   if (( top < 12 && h > 18 )); then top=12; fi
   if (( top < 8 )); then top=$((h / 2)); fi
-  echo "$top"
+  if (( top + log + 2 != h )); then
+    log=$((h - top - 2))
+    if (( log < 1 )); then log=1; fi
+  fi
+  printf '%s %s\n' "$top" "$log"
+}
+
+seed_install_keys() {
+  local os="${1:-$(uname -s)}"
+  case "$os" in
+    Darwin)
+      printf '%s\n' "Node.js" "Rust" "Homebrew" "ffmpeg" "ffprobe" "mpv" "VLC" "npm" "data" "UI build" "cargo" "launchable"
+      ;;
+    *)
+      printf '%s\n' "Node.js" "Rust" "cc" "WebKitGTK" "ffmpeg" "ffprobe" "mpv" "VLC" "npm" "data" "UI build" "cargo" "launchable"
+      ;;
+  esac
+}
+
+seed_uninstall_keys() {
+  printf '%s\n' "app" "Desktop" "applications" "launchable" "Node.js" "Rust" "ffmpeg" "mpv" "VLC"
+}
+
+seed_rows_from() {
+  local k
+  UI_KEYS=()
+  UI_STATE=()
+  UI_DETAIL=()
+  UI_KIND=()
+  while IFS= read -r k; do
+    [[ -z "$k" ]] && continue
+    UI_KEYS+=("$k")
+    UI_STATE+=("...")
+    UI_DETAIL+=("")
+    UI_KIND+=("wait")
+  done
+}
+
+seed_install_rows() { seed_rows_from < <(seed_install_keys); }
+seed_uninstall_rows() { seed_rows_from < <(seed_uninstall_keys); }
+
+kind_color() {
+  case "$1" in
+    ok) printf '%s' "$C_GRN" ;;
+    skip) printf '%s' "$C_DIM" ;;
+    warn) printf '%s' "$C_YEL" ;;
+    fail) printf '%s' "$C_RED" ;;
+    *) printf '%s' "$C_CYN" ;;
+  esac
+}
+
+ui_split_geom() {
+  _H="$(term_rows)"
+  _COLS="$(term_cols)"
+  local row_n=0
+  if [[ ${#UI_KEYS[@]} -gt 0 ]]; then row_n=${#UI_KEYS[@]}; fi
+  if [[ "$USE_SPLIT" -eq 0 ]]; then
+    _TOP="$_H"
+    _LOG=0
+    return 0
+  fi
+  read -r _TOP _LOG <<<"$(pane_layout "$_H" "$row_n")"
+}
+
+pane_top() {
+  ui_split_geom
+  printf '%s\n' "$_TOP"
+}
+
+put_at() {
+  local y="$1" text="$2" color="${3:-}"
+  local cols w
+  cols="$(term_cols)"
+  w=$((cols - 1))
+  if (( w < 1 )); then w=1; fi
+  text="$(clip_text "$text" "$w")"
+  printf '\033[%s;1H%s%s%s' "$y" "$color" "$text" "$C_RST"
 }
 
 add_ui_log() {
@@ -117,37 +236,35 @@ add_ui_log() {
 
 paint_log() {
   [[ "$USE_SPLIT" -eq 1 ]] || return 0
-  local h cols top start n from i idx
-  h="$(term_rows)"
-  cols="$(term_cols)"
-  top="$(pane_top)"
-  start=$((top + 2))
-  n=$((h - top - 1))
+  ui_split_geom
+  local start n from i idx
+  start=$((_TOP + 1))
+  n="$_LOG"
   if (( n < 1 )); then return 0; fi
   from=0
   if (( ${#LOG_LINES[@]} > n )); then from=$(( ${#LOG_LINES[@]} - n )); fi
   for (( i=0; i<n; i++ )); do
     idx=$((from + i))
-    printf '\033[%s;1H%s\033[K' "$((start + i))" "$C_DIM"
     if (( idx < ${#LOG_LINES[@]} )); then
-      printf '%s' "${LOG_LINES[$idx]}"
+      put_at "$((start + i))" "${LOG_LINES[$idx]}" "$C_DIM"
+    else
+      put_at "$((start + i))" "" "$C_DIM"
     fi
-    printf '%s' "$C_RST"
   done
 }
 
 draw_quit_hint() {
-  local cols rows msg x top
-  cols="$(term_cols)"
-  rows="$(term_rows)"
+  local cols rows msg
+  ui_split_geom
+  cols="$_COLS"
   msg="$QUIT_HINT"
   if [[ "$USE_SPLIT" -eq 1 ]]; then
-    top="$(pane_top)"
-    rows=$top
+    rows=$((_TOP - 1))
+  else
+    rows="$_H"
   fi
-  x=$(( cols - ${#msg} ))
-  if (( x < 1 )); then x=1; fi
-  printf '\033[%s;%sH%s%s%s' "$rows" "$x" "$C_DIM" "$msg" "$C_RST"
+  if (( rows < 1 )); then rows=1; fi
+  put_at "$rows" "$(clip_text "$(printf '%*s%s' $((cols - 1 - ${#msg})) "" "$msg")" $((cols - 1)))" "$C_DIM"
 }
 
 logo() {
@@ -168,6 +285,41 @@ logo() {
 }
 
 UI_PAINTED=0
+PAINT_Y=1
+
+paint_advance() {
+  local text="$1" color="${2:-}"
+  local limit
+  ui_split_geom
+  if [[ "$USE_SPLIT" -eq 1 ]]; then
+    limit=$((_TOP - 2))
+    if (( PAINT_Y >= limit )); then
+      return 0
+    fi
+  fi
+  put_at "$PAINT_Y" "$text" "$color"
+  PAINT_Y=$((PAINT_Y + 1))
+}
+
+write_logo() {
+  local mode="$1"
+  local title="epg.monster studio"
+  local sub="2026 edition  -  v2.0.2  -  $mode"
+  local inner=${#sub}
+  if (( ${#title} + 2 > inner )); then inner=$(( ${#title} + 2 )); fi
+  inner=$((inner + 2))
+  local H=$'\u2550' V=$'\u2551'
+  local TL=$'\u2554' TR=$'\u2557' BL=$'\u255A' BR=$'\u255D'
+  local fill="" i
+  for (( i=0; i<inner; i++ )); do fill+="$H"; done
+  paint_advance "  ${TL}${fill}${TR}" "$C_MAG"
+  paint_advance "  ${V}$(center "$title" "$inner")${V}" "$C_MAG"
+  paint_advance "  ${V}$(center "$sub" "$inner")${V}" "$C_MAG"
+  paint_advance "  ${BL}${fill}${BR}" "$C_MAG"
+}
+
+logo() { write_logo "$1"; }
+
 paint() {
   printf '\033[?25l'
   if [[ "$UI_PAINTED" -eq 0 ]]; then
@@ -175,18 +327,20 @@ paint() {
     UI_PAINTED=1
   fi
   printf '\033[H'
-  logo "$UI_MODE"
-  printf '%s    folder     %s%s\n' "$C_DIM" "$ROOT" "$C_RST"
-  printf '%s    launchable %s%s\n' "$C_DIM" "$LAUNCHABLE" "$C_RST"
-  printf '%s    data       %s/data%s\n' "$C_DIM" "$ROOT" "$C_RST"
-  echo
+  ui_split_geom
+  PAINT_Y=1
+  write_logo "$UI_MODE"
+  paint_advance "    folder     $ROOT" "$C_DIM"
+  paint_advance "    launchable $LAUNCHABLE" "$C_DIM"
+  paint_advance "    data       $ROOT/data" "$C_DIM"
+  paint_advance ""
   local i
   if [[ ${#UI_KEYS[@]} -gt 0 ]]; then
     for i in "${!UI_KEYS[@]}"; do
-      step_line "${UI_KEYS[$i]}" "${UI_STATE[$i]}" "${UI_DETAIL[$i]}" "${UI_KIND[$i]}"
+      paint_advance "$(step_line_text "${UI_KEYS[$i]}" "${UI_STATE[$i]}" "${UI_DETAIL[$i]}" "${UI_KIND[$i]}")" "$(kind_color "${UI_KIND[$i]}")"
     done
   fi
-  echo
+  paint_advance ""
   if [[ -n "$UI_NOTE" ]]; then
     local line color
     while IFS= read -r line; do
@@ -194,22 +348,28 @@ paint() {
       if [[ "$line" == *complete* ]]; then color="$C_GRN"
       elif [[ "$line" == -\>* ]]; then color="$C_CYN"
       fi
-      printf '%s  %s%s\n' "$color" "$line" "$C_RST"
+      paint_advance "  $line" "$color"
     done <<< "$UI_NOTE"
   fi
-  echo
   if [[ "$USE_SPLIT" -eq 1 ]]; then
-    local cols top i
-    cols="$(term_cols)"
-    top="$(pane_top)"
-    printf '\033[%s;1H%s  %s%s\033[K' "$((top - 1))" "$C_YEL" "$PROMPT_TEXT" "$C_RST"
+    local prompt_y quit_y div_y i rule
+    prompt_y=$((_TOP - 2))
+    quit_y=$((_TOP - 1))
+    div_y="$_TOP"
+    while (( PAINT_Y < prompt_y )); do
+      put_at "$PAINT_Y" ""
+      PAINT_Y=$((PAINT_Y + 1))
+    done
+    put_at "$prompt_y" "  $PROMPT_TEXT" "$C_YEL"
+    PAINT_Y="$quit_y"
     draw_quit_hint
-    printf '\033[%s;1H%s' "$((top + 1))" "$C_MAG"
-    for (( i=1; i<cols; i++ )); do printf '─'; done
-    printf '%s\033[K' "$C_RST"
+    rule=""
+    for (( i=1; i<_COLS; i++ )); do rule+="─"; done
+    put_at "$div_y" "$rule" "$C_MAG"
     paint_log
+    printf '\033[%s;1H' "$prompt_y"
   else
-    printf '\033[J'
+    printf '\033[%s;1H\033[J' "$PAINT_Y"
     draw_quit_hint
   fi
 }
@@ -299,24 +459,15 @@ reset_ui() {
 
 banner() {
   reset_ui "$1"
+  case "$1" in
+    install) seed_install_rows ;;
+    uninstall) seed_uninstall_rows ;;
+  esac
   paint
 }
 
 step_line() {
-  local name="$1" state="$2" detail="${3:-}" kind="$4"
-  local tag color
-  case "$kind" in
-    ok) tag="[ ok ]"; color="$C_GRN" ;;
-    skip) tag="[ -- ]"; color="$C_DIM" ;;
-    warn) tag="[ !! ]"; color="$C_YEL" ;;
-    fail) tag="[ XX ]"; color="$C_RED" ;;
-    *) tag="[ .. ]"; color="$C_CYN" ;;
-  esac
-  if [[ -n "$detail" ]]; then
-    printf '%s  %s  %-12s %s  %s%s\n' "$color" "$tag" "$name" "$state" "$detail" "$C_RST"
-  else
-    printf '%s  %s  %-12s %s%s\n' "$color" "$tag" "$name" "$state" "$C_RST"
-  fi
+  printf '%s%s%s\n' "$(kind_color "$4")" "$(step_line_text "$1" "$2" "${3:-}" "$4")" "$C_RST"
 }
 
 step() { set_row "$1" "$2" "${3:-}" "$4"; }
@@ -604,11 +755,31 @@ log_run() {
   return "$rc"
 }
 
+# log_run captures stdout/stderr, so ask for the sudo password on the TTY first.
+ensure_sudo() {
+  if sudo -n true 2>/dev/null; then
+    return 0
+  fi
+  PROMPT_TEXT="sudo password for package install"
+  paint
+  printf '\033[?25h'
+  if [[ -n "$STTY_ORIG" ]]; then
+    stty "$STTY_ORIG" 2>/dev/null || true
+  fi
+  sudo -v
+  local rc=$?
+  stty -ixon 2>/dev/null || true
+  PROMPT_TEXT=""
+  paint
+  return "$rc"
+}
+
 run_pkg_install() {
   local how="$1"
   shift
   case "$how" in
     apt)
+      ensure_sudo || return 1
       if [[ "$APT_UPDATED" -eq 0 ]]; then
         log_run "apt-get update" sudo apt-get update -y
         APT_UPDATED=1
@@ -616,9 +787,11 @@ run_pkg_install() {
       log_run "apt-get install $*" sudo apt-get install -y "$@"
       ;;
     dnf)
+      ensure_sudo || return 1
       log_run "dnf install $*" sudo dnf install -y "$@"
       ;;
     pacman)
+      ensure_sudo || return 1
       log_run "pacman -S $*" sudo pacman -S --noconfirm --needed "$@"
       ;;
     brew)
@@ -638,12 +811,15 @@ run_pkg_remove() {
   shift
   case "$how" in
     apt|nodesource)
+      ensure_sudo || return 1
       log_run "apt-get remove $*" sudo apt-get remove -y "$@"
       ;;
     dnf)
+      ensure_sudo || return 1
       log_run "dnf remove $*" sudo dnf remove -y "$@"
       ;;
     pacman)
+      ensure_sudo || return 1
       log_run "pacman -R $*" sudo pacman -R --noconfirm "$@"
       ;;
     brew)
@@ -856,16 +1032,34 @@ install_ffmpeg_unix() {
   fi
 }
 
+linux_webkit_ok() {
+  have_cmd pkg-config && { pkg-config --exists webkit2gtk-4.1 || pkg-config --exists webkit2gtk-4.0; }
+}
+
+linux_cc_ok() {
+  have_cmd cc || have_cmd gcc
+}
+
+# Ubuntu 24.04 / Mint 22: libappindicator3-dev conflicts with ayatana
+# (already used by the desktop). Tauri 2 builds against ayatana.
+apt_tray_dev_pkg() {
+  if apt-cache show libayatana-appindicator3-dev >/dev/null 2>&1; then
+    printf '%s\n' libayatana-appindicator3-dev
+  else
+    printf '%s\n' libappindicator3-dev
+  fi
+}
+
 install_build_libs_linux() {
   if [[ "$(uname -s)" != "Linux" ]]; then
     return 0
   fi
-  local need_webkit=1 need_cc=1
-  if have_cmd pkg-config && { pkg-config --exists webkit2gtk-4.1 || pkg-config --exists webkit2gtk-4.0; }; then
+  local need_webkit=1 need_cc=1 tray
+  if linux_webkit_ok; then
     need_webkit=0
     step "WebKitGTK" "ok" "" "ok"
   fi
-  if have_cmd cc || have_cmd gcc; then
+  if linux_cc_ok; then
     need_cc=0
     step "cc" "ok" "" "ok"
   fi
@@ -880,30 +1074,50 @@ install_build_libs_linux() {
   fi
   case "$PKG" in
     apt)
+      tray="$(apt_tray_dev_pkg)"
       if prompt_yes "Install Linux build deps with apt-get (sudo)?"; then
-        run_pkg_install apt \
+        if ! run_pkg_install apt \
           build-essential pkg-config \
-          libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev \
-          librsvg2-dev patchelf || true
+          libwebkit2gtk-4.1-dev libgtk-3-dev "$tray" \
+          librsvg2-dev patchelf; then
+          step "WebKitGTK" "apt failed" "see ./install.log" "fail"
+        fi
       fi
       ;;
     dnf)
       if prompt_yes "Install Linux build deps with dnf (sudo)?"; then
-        run_pkg_install dnf gcc pkgconf-pkg-config \
+        if ! run_pkg_install dnf gcc pkgconf-pkg-config \
           webkit2gtk4.1-devel gtk3-devel libappindicator-gtk3-devel \
-          librsvg2-devel patchelf || true
+          librsvg2-devel patchelf; then
+          step "WebKitGTK" "dnf failed" "see ./install.log" "fail"
+        fi
       fi
       ;;
     pacman)
       if prompt_yes "Install Linux build deps with pacman (sudo)?"; then
-        run_pkg_install pacman base-devel pkgconf \
-          webkit2gtk-4.1 gtk3 libappindicator-gtk3 librsvg patchelf || true
+        if ! run_pkg_install pacman base-devel pkgconf \
+          webkit2gtk-4.1 gtk3 libappindicator-gtk3 librsvg patchelf; then
+          step "WebKitGTK" "pacman failed" "see ./install.log" "fail"
+        fi
       fi
       ;;
     *)
       echo "See README: install libwebkit2gtk-4.1-dev libgtk-3-dev (or distro equivalent)."
       ;;
   esac
+  if linux_webkit_ok; then
+    step "WebKitGTK" "ok" "" "ok"
+  else
+    echo "Need WebKitGTK headers to compile (libwebkit2gtk-4.1-dev or distro equivalent)." >&2
+    echo "See ${ACTION_LOG:-./install.log}" >&2
+    exit 1
+  fi
+  if linux_cc_ok; then
+    step "cc" "ok" "" "ok"
+  else
+    echo "Need a C compiler (build-essential / gcc) to compile." >&2
+    exit 1
+  fi
 }
 
 cargo_target_dir() {
@@ -983,8 +1197,19 @@ build_launchable() {
     if [[ "$pct" -gt 99 && "$CARGO_DONE" -eq 0 ]]; then pct=99; fi
     set_row "cargo" "($n/$total  ${pct}%)" "$verb  $name" "wait"
   }
-  local line crate fresh
-  while IFS= read -r line; do
+  local line crate fresh cargo_log cargo_rc=0
+  cargo_log="$(mktemp)"
+  set +e
+  cargo build -p epg-monster-studio --message-format=json --release --features custom-protocol --manifest-path src-tauri/Cargo.toml >"$cargo_log" 2>&1
+  cargo_rc=$?
+  set -e
+  log_line ""
+  log_line ">> cargo build -p epg-monster-studio --release"
+  if [[ -n "$ACTION_LOG" ]]; then
+    cat "$cargo_log" >>"$ACTION_LOG" || true
+  fi
+  log_line "exit: $cargo_rc"
+  while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$line" == \{* ]]; then
       crate=""
       crate="$(printf '%s\n' "$line" | sed -n 's/.*#\([^@"]*\)@\([^"]*\)".*/\1 v\2/p' | head -n 1)"
@@ -1001,7 +1226,13 @@ build_launchable() {
     elif [[ "$line" =~ Checking[[:space:]]+([^[:space:]]+)[[:space:]]+(v[^[:space:]]+) ]]; then
       cargo_add_crate "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}" 1
     fi
-  done < <(cargo build -p epg-monster-studio --message-format=json --release --features custom-protocol --manifest-path src-tauri/Cargo.toml 2>&1)
+  done < "$cargo_log"
+  rm -f "$cargo_log"
+  if [[ "$cargo_rc" -ne 0 ]]; then
+    set_row "cargo" "failed" "exit $cargo_rc" "fail"
+    echo "cargo build failed (exit $cargo_rc). See ${ACTION_LOG:-./install.log}." >&2
+    exit "$cargo_rc"
+  fi
   CARGO_DONE=1
   n=$(( ${#COMPILE_CRATES[@]} + ${#CHECK_CRATES[@]} ))
   set_row "cargo" "($n/$n  100%)" "done" "ok"
@@ -1028,6 +1259,9 @@ install_studio() {
       brew_env
     fi
     PKG="$(detect_pkg)"
+    if have_cmd brew; then
+      step "Homebrew" "ok" "$(brew --prefix 2>/dev/null || true)" "ok"
+    fi
   fi
   if [[ "$(uname -s)" == Linux && "$PKG" == none ]]; then
     echo "No apt-get, dnf, or pacman on PATH. Install Node, Rust, and ffmpeg yourself, then re-run --install." >&2
@@ -1292,6 +1526,11 @@ start_studio() {
   echo $! > "$PIDFILE"
   step "app" "started" "pid $(tr -d '[:space:]' < "$PIDFILE") cargo run" "ok"
 }
+
+# Sourced by scripts/test-studio-ui.sh — do not install or touch the TTY.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 
 want_install=0
 want_shortcuts=0

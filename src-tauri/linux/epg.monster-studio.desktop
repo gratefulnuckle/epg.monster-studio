@@ -1,0 +1,11 @@
+[Desktop Entry]
+Categories={{categories}}
+{{#if comment}}
+Comment={{comment}}
+{{/if}}
+Exec={{exec}}
+Icon={{icon}}
+Name=epg.monster studio
+Terminal=false
+Type=Application
+StartupNotify=true

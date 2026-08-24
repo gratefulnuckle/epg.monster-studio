@@ -89,9 +89,13 @@ Linux compile packages if you prefer apt yourself:
 
 ```bash
 sudo apt install -y \
-  libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev \
+  libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
   librsvg2-dev patchelf ffmpeg
 ```
+
+On Ubuntu 24.04 / Mint 22, `libappindicator3-dev` conflicts with Ayatana
+(the tray library the desktop already uses). `./studio.sh --install` picks
+`libayatana-appindicator3-dev` when apt has it.
 
 macOS: accept the Homebrew prompts from `--install`, or `brew install node rust ffmpeg mpv` and `brew install --cask vlc`.
 
@@ -167,8 +171,11 @@ cargo test -p studio-core
 Linux `.deb` and AppImage locally:
 
 ```bash
+export CARGO_TARGET_DIR="$(pwd)/src-tauri/target"
 npx tauri build --bundles deb,appimage
 ```
+
+Artifacts land in `src-tauri/target/release/bundle/` (`epg.monster-studio_2.0.2_amd64.deb` and `.AppImage`). GitHub Release on a `v2.*` tag attaches those files. `./studio.sh --install` is the two-pane tester flow (fixed step table on top, log below), not the package.
 
 Windows NSIS and signed dmg are **[v3](docs/V3.md)**.
 

@@ -1,0 +1,18 @@
+{
+  "productName": "epg.monster-studio",
+  "bundle": {
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "ffmpeg",
+          "libayatana-appindicator3-1 | libappindicator3-1"
+        ],
+        "recommends": ["mpv", "vlc"],
+        "section": "utils",
+        "desktopTemplate": "linux/epg.monster-studio.desktop"
+      }
+    }
+  }
+}
