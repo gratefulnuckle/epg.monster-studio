@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://epg.monster/img/logo.png" alt="epg.monster">
+  <img src="https://i.imgur.com/TY3OgHP.png" alt="epg.monster">
 </p>
 
 # epg.monster studio
