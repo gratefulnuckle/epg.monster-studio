@@ -1,0 +1,11 @@
+[package]
+name = "ghoul-play"
+version = "3.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "G-houl playback: engine trait, UA presets, mpv IPC, libmpv, GStreamer sidecar"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libloading = "0.8"

@@ -3,6 +3,9 @@ import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { bindVirtualList, type VirtualList } from "./virtual";
 import { bindThreeColSplit } from "./split";
+import { fillTvgShiftSelect } from "./tvg-shift";
+import { keepGroup, nextIssueId } from "./issue-nav";
+import { notifyPhysicalSave } from "./save-status";
 
 export type AuditRow = {
   managedChannelId: string;
@@ -90,14 +93,38 @@ export function epgHtml(): string {
     <div class="dialog-backdrop" id="epg-auto-dlg">
       <div class="dialog" style="width:520px">
         <h2>Apply suggestions</h2>
-        <p class="page-sub">Groups with unmatched or unknown tvg-ids. Pick a score level, select groups, then auto match.</p>
+        <p class="page-sub">Groups with unmatched or unknown tvg-ids. Auto Match applies the first suggestion. Scrolled User Approved asks Yes or No on each channel.</p>
         <div class="field"><label>Approved score level</label>
           <select id="epg-score"></select></div>
+        <div class="field"><label>EPG timeshift (tvg-shift) — e.g. Vancouver / Pacific for a delayed feed</label>
+          <select id="epg-shift"></select></div>
         <div id="epg-group-picks" class="editor-list" style="max-height:240px"></div>
         <p class="page-sub" id="epg-auto-preview"></p>
         <div class="dialog-actions">
           <button id="epg-auto-cancel">Cancel</button>
-          <button class="accent" id="epg-auto-go">Auto match</button>
+          <button id="epg-review-go">Scrolled User Approved</button>
+          <button class="accent" id="epg-auto-go">Auto Match</button>
+        </div>
+      </div>
+    </div>
+    <div class="dialog-backdrop" id="epg-review-dlg">
+      <div class="dialog epg-review-dialog">
+        <h2>Approve match?</h2>
+        <p class="page-sub" id="epg-review-progress"></p>
+        <div class="epg-review-scroll" id="epg-review-scroll">
+          <div class="epg-review-card" id="epg-review-card">
+            <div class="chan-name" id="epg-review-name"></div>
+            <div class="chan-sub" id="epg-review-cur"></div>
+            <div class="chan-sub" id="epg-review-best"></div>
+            <div class="field"><label>EPG timeshift / tvg-shift</label>
+              <select id="epg-review-shift"></select></div>
+            <div id="epg-review-hits" class="editor-list"></div>
+          </div>
+        </div>
+        <div class="dialog-actions">
+          <button id="epg-review-stop">Stop</button>
+          <button id="epg-review-no">No</button>
+          <button class="accent" id="epg-review-yes">Yes</button>
         </div>
       </div>
     </div>
@@ -121,6 +148,10 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
     scoreSel.appendChild(o);
   }
   scoreSel.selectedIndex = 2;
+  const applyShiftSel = page.querySelector<HTMLSelectElement>("#epg-shift")!;
+  fillTvgShiftSelect(applyShiftSel, 0);
+  const reviewShiftSel = page.querySelector<HTMLSelectElement>("#epg-review-shift")!;
+  fillTvgShiftSelect(reviewShiftSel, 0);
 
   let rows: AuditRow[] = [];
   let group = "";
@@ -139,11 +170,29 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
     count.textContent = `${issues} issues`;
   };
 
-  const reload = async () => {
+  const visibleIdsIn = (g: string) =>
+    rows
+      .filter((r) => r.groupTitle === g && (showMatched || r.status !== "matched"))
+      .map((r) => r.managedChannelId);
+
+  const reload = async (keep?: { group: string; prevIds: string[]; appliedId: string }) => {
     const count = page.querySelector("#epg-count");
     if (count) count.textContent = "Loading…";
     rows = await invoke<AuditRow[]>("epg_audit");
     paintCount();
+    if (keep) {
+      group = keep.group;
+      if (showMatched) {
+        selected = rows.find((r) => r.managedChannelId === keep.appliedId) ?? null;
+      } else {
+        const nid = nextIssueId(keep.prevIds, keep.appliedId);
+        selected = nid ? (rows.find((r) => r.managedChannelId === nid) ?? null) : null;
+      }
+      if (!selected && group) {
+        selected =
+          rows.find((r) => r.groupTitle === group && (showMatched || r.status !== "matched")) ?? null;
+      }
+    }
     paintGroups();
   };
 
@@ -156,27 +205,32 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
     );
     const el = page.querySelector<HTMLElement>("#epg-groups");
     if (!el) return;
-    if (!titles.includes(group)) group = titles[0] ?? "";
-    if (selected && !titles.includes(selected.groupTitle)) selected = null;
-    groupVirt?.destroy();
-    el.innerHTML = "";
-    groupVirt = bindVirtualList({
-      scroller: el,
-      rowHeight: 36,
-      renderRow: (t) => {
-        const issues = issuesIn(t);
-        const b = document.createElement("button");
-        b.className = "group-row" + (t === group ? " active" : "");
-        b.innerHTML = `${esc(t)}<span class="issue-n"> ${issues} issues</span>`;
-        b.addEventListener("click", () => {
-          group = t;
-          selected = null;
-          paintGroups();
-          paintDetail();
-        });
-        return b;
-      },
-    });
+    group = keepGroup(titles, group);
+    if (selected && selected.groupTitle !== group) selected = null;
+    if (selected) {
+      selected = rows.find((r) => r.managedChannelId === selected!.managedChannelId) ?? selected;
+    }
+    if (!groupVirt) {
+      groupVirt = bindVirtualList({
+        scroller: el,
+        rowHeight: 36,
+        renderRow: (t) => {
+          const issues = issuesIn(t);
+          const b = document.createElement("button");
+          b.className = "group-row" + (t === group ? " active" : "");
+          b.innerHTML = `${esc(t)}<span class="issue-n"> ${issues} issues</span>`;
+          b.addEventListener("click", () => {
+            group = t;
+            selected = null;
+            const chans = page.querySelector<HTMLElement>("#epg-channels");
+            if (chans) chans.scrollTop = 0;
+            paintGroups();
+            paintDetail();
+          });
+          return b;
+        },
+      });
+    }
     groupVirt.setItems(titles);
     paintChannels();
     paintDetail();
@@ -312,6 +366,11 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
     if (!selected) return;
     const tvg = (page.querySelector("#epg-tvg") as HTMLInputElement).value.trim();
     if (!tvg) return;
+    const keep = {
+      group,
+      prevIds: visibleIdsIn(group),
+      appliedId: selected.managedChannelId,
+    };
     try {
       await invoke("epg_apply", {
         managedId: selected.managedChannelId,
@@ -319,8 +378,9 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
         logo: selected.suggestedLogo,
         applyLogo: false,
       });
+      notifyPhysicalSave();
       toast(`Applied ${tvg}`);
-      await reload();
+      await reload(keep);
     } catch (e) {
       toast(String(e));
     }
@@ -420,26 +480,146 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
         selectedGroups.includes(r.groupTitle) &&
         r.suggestedTvgId &&
         r.score + 0.0001 >= min &&
-        (r.score >= 0.98 || r.score - (r.secondScore ?? 0) >= 0.1) &&
         !String(r.suggestedTvgId).toLowerCase().includes("dummy"),
     ).length;
     page.querySelector("#epg-auto-preview")!.textContent =
-      `${n} unique suggestion(s) ready at this score in the selected groups. Logos are not changed.`;
+      `${n} suggestion(s) at this score in the selected groups. Logos are not changed.`;
   }
+
+  const pickedGroups = () =>
+    [...page.querySelectorAll<HTMLInputElement>("#epg-group-picks input:checked")].map((i) => i.dataset.g!);
 
   page.querySelector("#epg-auto-cancel")!.addEventListener("click", () => dlg.classList.remove("open"));
   page.querySelector("#epg-auto-go")!.addEventListener("click", async () => {
-    const groups = [...page.querySelectorAll<HTMLInputElement>("#epg-group-picks input:checked")].map(
-      (i) => i.dataset.g!,
-    );
+    const groups = pickedGroups();
     try {
-      const n = await invoke<number>("epg_auto_match", { groups, minScore: Number(scoreSel.value) });
+      const n = await invoke<number>("epg_auto_match", {
+        groups,
+        minScore: Number(scoreSel.value),
+        requireUnique: false,
+        tvgShiftHours: Number(applyShiftSel.value),
+      });
       dlg.classList.remove("open");
-      toast(n ? `Applied ${n}` : "No unique suggestions met that score in the selected groups");
+      toast(n ? `Applied ${n}` : "No suggestions met that score in the selected groups");
       await reload();
     } catch (e) {
       toast(String(e));
     }
+  });
+
+  type SuggestHit = { tvgId: string; name: string; line?: string };
+  let reviewQueue: AuditRow[] = [];
+  let reviewAt = 0;
+  let reviewHits: SuggestHit[] = [];
+  let reviewPick = 0;
+  const reviewDlg = page.querySelector("#epg-review-dlg")!;
+
+  const finishReview = async (msg: string) => {
+    reviewDlg.classList.remove("open");
+    toast(msg);
+    await reload();
+  };
+
+  const paintReviewCard = async () => {
+    const r = reviewQueue[reviewAt];
+    if (!r) {
+      await finishReview("Review finished");
+      return;
+    }
+    const prog = page.querySelector("#epg-review-progress");
+    if (prog) prog.textContent = `${reviewAt + 1} of ${reviewQueue.length}`;
+    const nameEl = page.querySelector("#epg-review-name");
+    if (nameEl) nameEl.textContent = r.channelName;
+    const cur = page.querySelector("#epg-review-cur");
+    if (cur) cur.textContent = `Current: ${r.currentTvgId || "—"}`;
+    const best = page.querySelector("#epg-review-best");
+    if (best) {
+      best.textContent = r.suggestedTvgId
+        ? `First match: ${r.suggestedTvgId}  —  ${r.suggestedName ?? ""}  (${r.score.toFixed(2)})`
+        : "No first match";
+    }
+    reviewHits = [];
+    reviewPick = 0;
+    if (r.suggestedTvgId) {
+      reviewHits.push({ tvgId: r.suggestedTvgId, name: r.suggestedName ?? "" });
+    }
+    try {
+      const extra = await invoke<SuggestHit[]>("suggest_tvg", { query: r.channelName });
+      for (const h of extra) {
+        if (!reviewHits.some((x) => x.tvgId.toLowerCase() === h.tvgId.toLowerCase())) {
+          reviewHits.push(h);
+        }
+      }
+    } catch {
+      /* keep first match */
+    }
+    reviewHits = reviewHits.slice(0, 6);
+    fillTvgShiftSelect(reviewShiftSel, Number(applyShiftSel.value) || 0);
+    const box = page.querySelector("#epg-review-hits");
+    if (box) {
+      box.innerHTML = "";
+      reviewHits.forEach((h, i) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "suggest-item" + (i === 0 ? " active" : "");
+        b.textContent = `${h.tvgId}  —  ${h.name}`;
+        b.addEventListener("click", () => {
+          reviewPick = i;
+          box.querySelectorAll(".suggest-item").forEach((el) => el.classList.remove("active"));
+          b.classList.add("active");
+        });
+        box.appendChild(b);
+      });
+    }
+    page.querySelector("#epg-review-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    page.querySelector("#epg-review-scroll")?.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  page.querySelector("#epg-review-go")!.addEventListener("click", () => {
+    const groups = pickedGroups();
+    const min = Number(scoreSel.value);
+    reviewQueue = rows.filter(
+      (r) =>
+        r.status !== "matched" &&
+        groups.includes(r.groupTitle) &&
+        r.suggestedTvgId &&
+        r.score + 0.0001 >= min &&
+        !String(r.suggestedTvgId).toLowerCase().includes("dummy"),
+    );
+    if (reviewQueue.length === 0) {
+      toast("No suggestions at this score in the selected groups");
+      return;
+    }
+    dlg.classList.remove("open");
+    reviewAt = 0;
+    reviewDlg.classList.add("open");
+    void paintReviewCard();
+  });
+  page.querySelector("#epg-review-stop")!.addEventListener("click", () => {
+    void finishReview(`Stopped after ${reviewAt} of ${reviewQueue.length}`);
+  });
+  page.querySelector("#epg-review-no")!.addEventListener("click", () => {
+    reviewAt += 1;
+    void paintReviewCard();
+  });
+  page.querySelector("#epg-review-yes")!.addEventListener("click", async () => {
+    const r = reviewQueue[reviewAt];
+    const hit = reviewHits[reviewPick] ?? reviewHits[0];
+    if (r && hit) {
+      try {
+        await invoke("epg_apply", {
+          managedId: r.managedChannelId,
+          tvgId: hit.tvgId,
+          logo: r.suggestedLogo,
+          applyLogo: false,
+          tvgShiftHours: Number(reviewShiftSel.value),
+        });
+      } catch (e) {
+        toast(String(e));
+      }
+    }
+    reviewAt += 1;
+    void paintReviewCard();
   });
 
   page.querySelector("#epg-browse")!.addEventListener("click", async () => {
@@ -462,14 +642,20 @@ export async function mountEpg(page: HTMLElement, toast: (s: string) => void): P
     try {
       const box = page.querySelector<HTMLInputElement>("#epg-tvg");
       if (box) box.value = tvg;
+      const keep = {
+        group,
+        prevIds: visibleIdsIn(group),
+        appliedId: selected.managedChannelId,
+      };
       await invoke("epg_apply", {
         managedId: selected.managedChannelId,
         tvgId: tvg,
         logo: selected.suggestedLogo,
         applyLogo: false,
       });
+      notifyPhysicalSave();
       toast(`Applied ${tvg}`);
-      await reload();
+      await reload(keep);
     } catch (e) {
       toast(String(e));
     }

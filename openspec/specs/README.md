@@ -1,14 +1,15 @@
 # Current specs
 
-Living source of truth after archive of `1-1-tauri-remake`. G-houl Player is v3 (`docs/V3.md`).
+Living source of truth after archive of `1-1-tauri-remake`. This is **v3**
+(`v3.0.0`): desktop and server flavors, web login, API keys, headless, desktop
+Connect. Install is `studio.ps1` / `studio.sh` only (no NSIS, no macOS Dev ID). See `docs/V3.md` for in-app replace.
 
-These requirements describe the shipped **epg.monster studio** (Tauri v2) and the
-v2 launchers (`studio.ps1` / `studio.sh`). New work goes through
-`openspec/changes/<name>/`.
+These requirements describe the shipped **epg.monster studio** (Tauri v2 shell)
+and the v3 launchers (`studio.ps1` / `studio.sh`). New work goes through
+`openspec/changes/<name>/`. Operator install steps: `INSTALL.md`.
 
-Launcher install/uninstall (Windows winget + Scoop, Linux apt/dnf/pacman, macOS
-Homebrew, `.studio-install.json`) lives in `install-scripts/`. The app specs do
-not cover those scripts.
+Launcher install/uninstall lives in `install-scripts/`. Server HTTP, keys, and
+remote Connect live in `server-host/`.
 
 Live work is GitHub issues (`gh issue list --label openspec`). Sync a change with
 `.\scripts\openspec-gh.ps1 -Change <name>`. Spec: `github-tracking/`.

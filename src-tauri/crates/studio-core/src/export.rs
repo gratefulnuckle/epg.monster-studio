@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use crate::epg::tvg_lookup_ids;
 use crate::hdhr::xmltv_time;
@@ -11,6 +12,32 @@ fn xml_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Playlist tvg-ids plus catalog aliases so `list_programmes` can find rows.
+pub fn programme_lookup_ids(channels: &[ManagedChannel]) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    for ch in channels {
+        let Some(id) = ch.tvg_id.as_deref() else {
+            continue;
+        };
+        for alias in tvg_lookup_ids(id) {
+            let key = alias.to_ascii_lowercase();
+            if seen.insert(key) {
+                ids.push(alias);
+            }
+        }
+    }
+    ids
+}
+
+pub fn write_guide_xmltv(
+    path: &Path,
+    channels: &[ManagedChannel],
+    programmes: &[EpgProgramme],
+) -> Result<(), String> {
+    std::fs::write(path, export_guide_xmltv(channels, programmes)).map_err(|e| e.to_string())
 }
 
 /// XMLTV for a curated playlist: `channel` / `programme@channel` use the playlist tvg-id.
@@ -25,6 +52,9 @@ pub fn export_guide_xmltv(channels: &[ManagedChannel], programmes: &[EpgProgramm
     }
     let mut sb = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<tv generator-info-name=\"epg.monster studio\">\n");
     for ch in channels {
+        if ch.hidden {
+            continue;
+        }
         let id = ch
             .tvg_id
             .as_deref()
@@ -46,6 +76,9 @@ pub fn export_guide_xmltv(channels: &[ManagedChannel], programmes: &[EpgProgramm
         sb.push_str("</display-name>\n  </channel>\n");
     }
     for ch in channels {
+        if ch.hidden {
+            continue;
+        }
         let id = ch
             .tvg_id
             .as_deref()
@@ -106,6 +139,100 @@ fn write_extinf(out: &mut String, ch: &ManagedChannel, display: &str) {
     out.push('\n');
 }
 
+fn visible_variant(ch: &ManagedChannel) -> Option<&crate::models::StreamVariant> {
+    ch.variants
+        .iter()
+        .find(|v| v.visibility == "visible" && !v.url.trim().is_empty())
+}
+
+/// Refuse to mount G-houl when the curated lineup cannot play.
+pub fn ghoul_mount_gate(channels: &[ManagedChannel]) -> Result<(), String> {
+    if channels.is_empty() {
+        return Err("Load a curated playlist in Playlist Editor first.".into());
+    }
+    if channels
+        .iter()
+        .filter(|ch| !ch.hidden)
+        .all(|ch| visible_variant(ch).is_none())
+    {
+        return Err("Curated channels have no playable stream URLs.".into());
+    }
+    Ok(())
+}
+
+/// Visible-only M3U snapshot for G-houl, with per-row UA and extra headers as
+/// `#EXTVLCOPT:` / `#EXTHTTP:` tags so both hosts share one parse path.
+pub fn export_ghoul_snapshot(
+    channels: &[ManagedChannel],
+    headers_by_variant: &HashMap<String, Vec<(String, String)>>,
+) -> String {
+    let mut sb = String::from("#EXTM3U\n");
+    let mut list = channels.to_vec();
+    list.sort_by(|a, b| {
+        a.sort_order
+            .cmp(&b.sort_order)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    for ch in list {
+        if ch.hidden {
+            continue;
+        }
+        let Some(v) = visible_variant(&ch) else {
+            continue;
+        };
+        write_extinf(&mut sb, &ch, &ch.name);
+        let headers = headers_by_variant.get(&v.id).cloned().unwrap_or_default();
+        let mut ua = String::new();
+        let mut extra: Vec<(String, String)> = Vec::new();
+        for (k, val) in headers {
+            if k.eq_ignore_ascii_case("user-agent") {
+                ua = val;
+            } else if !val.trim().is_empty() {
+                extra.push((k, val));
+            }
+        }
+        if !ua.trim().is_empty() {
+            sb.push_str("#EXTVLCOPT:http-user-agent=");
+            sb.push_str(ua.trim());
+            sb.push('\n');
+        }
+        for (k, val) in &extra {
+            if k.eq_ignore_ascii_case("referer") || k.eq_ignore_ascii_case("referrer") {
+                sb.push_str("#EXTVLCOPT:http-referrer=");
+                sb.push_str(val.trim());
+                sb.push('\n');
+            }
+        }
+        let others: Vec<(String, String)> = extra
+            .into_iter()
+            .filter(|(k, _)| {
+                !k.eq_ignore_ascii_case("referer") && !k.eq_ignore_ascii_case("referrer")
+            })
+            .collect();
+        if !others.is_empty() {
+            sb.push_str("#EXTHTTP:{");
+            for (i, (k, val)) in others.iter().enumerate() {
+                if i > 0 {
+                    sb.push(',');
+                }
+                sb.push('"');
+                sb.push_str(&json_escape(k));
+                sb.push_str("\":\"");
+                sb.push_str(&json_escape(val));
+                sb.push('"');
+            }
+            sb.push_str("}\n");
+        }
+        sb.push_str(&v.url);
+        sb.push('\n');
+    }
+    sb
+}
+
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 pub fn export_visible_only(channels: &[ManagedChannel]) -> String {
     let mut sb = String::from("#EXTM3U\n");
     let mut list = channels.to_vec();
@@ -115,6 +242,9 @@ pub fn export_visible_only(channels: &[ManagedChannel]) -> String {
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     for ch in list {
+        if ch.hidden {
+            continue;
+        }
         let url = ch
             .variants
             .iter()
@@ -184,6 +314,7 @@ mod tests {
             sort_order: 1,
             tvg_shift_hours: 0.0,
             in_tuner: false,
+            hidden: false,
             tuner_number: None,
             variants: vec![
                 StreamVariant {
@@ -218,6 +349,57 @@ mod tests {
     }
 
     #[test]
+    fn ghoul_snapshot_visible_only_with_ua_and_headers() {
+        let row = ch();
+        let mut headers = HashMap::new();
+        headers.insert(
+            "v1".into(),
+            vec![
+                ("User-Agent".into(), "Foo/1".into()),
+                ("Referer".into(), "http://ref".into()),
+                ("X-Token".into(), "abc".into()),
+            ],
+        );
+        let s = export_ghoul_snapshot(&[row], &headers);
+        assert!(s.contains("http://vis"));
+        assert!(!s.contains("http://bak"));
+        assert!(s.contains("#EXTVLCOPT:http-user-agent=Foo/1"));
+        assert!(s.contains("#EXTVLCOPT:http-referrer=http://ref"));
+        assert!(s.contains("#EXTHTTP:"));
+        assert!(s.contains("X-Token"));
+        assert!(s.contains("abc"));
+    }
+
+    #[test]
+    fn ghoul_gate_empty_and_url_less() {
+        assert_eq!(
+            ghoul_mount_gate(&[]).unwrap_err(),
+            "Load a curated playlist in Playlist Editor first."
+        );
+        let mut row = ch();
+        row.variants[0].url.clear();
+        row.variants[1].url.clear();
+        assert_eq!(
+            ghoul_mount_gate(&[row]).unwrap_err(),
+            "Curated channels have no playable stream URLs."
+        );
+        assert!(ghoul_mount_gate(&[ch()]).is_ok());
+    }
+
+    #[test]
+    fn visible_export_omits_hidden_channels() {
+        let mut row = ch();
+        row.hidden = true;
+        let hidden = export_visible_only(&[row.clone()]);
+        assert!(!hidden.contains("http://vis"));
+        assert!(!hidden.contains("CNN"));
+        row.hidden = false;
+        let shown = export_visible_only(&[row]);
+        assert!(shown.contains("http://vis"));
+        assert!(shown.contains("CNN"));
+    }
+
+    #[test]
     fn visible_export_omits_backups() {
         let s = export_visible_only(&[ch()]);
         assert!(s.contains("http://vis"));
@@ -232,6 +414,35 @@ mod tests {
         assert!(s.contains("http://vis"));
         assert!(s.contains("http://bak"));
         assert!(s.contains("CNN (B)"));
+    }
+
+    #[test]
+    fn programme_lookup_ids_includes_aliases() {
+        let mut row = ch();
+        row.tvg_id = Some("KAUT-DT.us_locals1.us (src05)".into());
+        let ids = programme_lookup_ids(&[row]);
+        assert!(ids.iter().any(|s| s.eq_ignore_ascii_case("KAUT-DT.us")));
+        assert!(ids.iter().any(|s| s.contains("src05")));
+    }
+
+    #[test]
+    fn write_guide_xmltv_writes_sliced_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("iptv.xml");
+        let mut row = ch();
+        row.tvg_id = Some("KAUT-DT.us_locals1.us (src05)".into());
+        let programmes = [crate::models::EpgProgramme {
+            tvg_id: "KAUT-DT.us".into(),
+            title: "Local News".into(),
+            description: None,
+            start_utc: "2026-08-19T20:00:00Z".into(),
+            stop_utc: "2026-08-19T21:00:00Z".into(),
+        }];
+        write_guide_xmltv(&path, &[row], &programmes).unwrap();
+        let xml = std::fs::read_to_string(&path).unwrap();
+        assert!(xml.contains("Local News"));
+        assert!(xml.contains("channel=\"KAUT-DT.us_locals1.us (src05)\""));
+        assert!(xml.contains("generator-info-name=\"epg.monster studio\""));
     }
 
     #[test]

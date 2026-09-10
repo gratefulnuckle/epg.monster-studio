@@ -1,0 +1,16 @@
+[package]
+name = "ghoul-guide"
+version = "3.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "G-houl guide: M3U + XMLTV on a worker thread"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+quick-xml = "0.37"
+flate2 = "1"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"

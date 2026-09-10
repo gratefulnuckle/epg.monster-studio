@@ -1,4 +1,5 @@
-# Keep Rust artifacts off C: on Windows GNU.
-# studio.sh sets CARGO_TARGET_DIR on Linux/macOS so this path is not used.
+# Keep Windows Rust artifacts off C:. studio.sh overrides this with
+# CARGO_TARGET_DIR on Linux/macOS — cargo treats a drive letter as a
+# relative path, which is why --shortcuts could not find the binary.
 [build]
 target-dir = "S:\\toolchains\\cargo-target\\epg-monster-studio"

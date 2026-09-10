@@ -15,75 +15,80 @@
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=for-the-badge)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/gratefulnuckle/epg.monster-studio?style=for-the-badge)](https://github.com/gratefulnuckle/epg.monster-studio/releases)
 
-**epg.monster studio** is a desktop app for curating IPTV playlists: load M3U/M3U8
-sources, edit a managed list with hidden backups, match EPG ids from epg.monster,
-probe streams with ffmpeg, and present the list to Plex / Jellyfin / Emby / TiviMate
-as a local HDHomeRun-style tuner.
+**epg.monster studio** is a desktop (and optional server) app for curating IPTV
+playlists: load M3U/M3U8 sources, edit a managed list with hidden backups, match
+EPG ids from epg.monster, probe streams with ffmpeg, and present the list to
+Plex / Jellyfin / Emby / TiviMate as a local HDHomeRun-style tuner.
 
-This tree is the **v2** app: **Tauri v2 + Rust + TypeScript**, on **Windows, Linux,
-and macOS**. Window title is always **epg.monster studio**. Edition **2026**,
-semver **2.0.2**.
+This tree is **v3**: **Tauri v2 + Rust + TypeScript**, on **Windows, Linux, and
+macOS**. Window title is always **epg.monster studio**. Edition **2026**,
+semver **3.0.0**. Desktop window, or `studio-server` in a browser / headless API.
+A desktop can **Connect** to a remote studio with an `epgs_` API key.
 
 This is an operator tool. Use it only with sources you have the right to use.
 
 ---
 
-## Install (v2 testers)
+## Install (v3)
 
-| OS | v2 | v3 (later) |
-|----|----|------------|
-| Windows | `.\studio.ps1` (dev) | NSIS + Authenticode |
-| Linux | `./studio.sh`, `.deb`, or AppImage | — |
-| macOS | `./studio.sh` | signed `.dmg` |
+**Full walkthrough:** [INSTALL.md](INSTALL.md) (flavors, flags, first run, uninstall).
 
-### Dev (all platforms)
+Install is **`studio.ps1` / `studio.sh`** ([INSTALL.md](INSTALL.md)). There is no
+Windows setup.exe and no signed macOS `.dmg`. Clone the repo; data stays in
+`./data`. Linux **`.deb` / AppImage** may attach on a version tag; they are
+optional, not the Windows/macOS path.
 
 Needs **Rust** (stable) and **Node 22+**.
 
 **Windows (PowerShell)**
 
 ```powershell
-.\studio.ps1              # deps, release .exe, then start
+.\studio.ps1 --install desktop   # windowed app
+.\studio.ps1 --install server    # browser UI / headless API (no desktop window)
+.\studio.ps1 --start             # desktop: .exe · server: http://127.0.0.1:1420
+.\studio.ps1 --start headless    # server only: API, no web UI
+.\studio.ps1 --makepass          # server: temp admin password (must change at login)
+.\studio.ps1 --makekey           # server: desktop API key (shown once)
 .\studio.ps1 --stop
-.\studio.ps1 --start
 .\studio.ps1 --restart
-.\studio.ps1 --install    # Node/Rust via winget; ffmpeg/mpv/VLC via scoop then winget; build the .exe
-.\studio.ps1 --shortcuts  # Desktop + Start Menu
-.\studio.ps1 --uninstall  # stop, remove shortcuts + launchable; optional tools (keeps .\data)
+.\studio.ps1 --shortcuts         # Desktop + Start Menu (desktop binary)
+.\studio.ps1 --uninstall         # keeps .\data
 ```
 
 **Linux / macOS**
 
 ```bash
 chmod +x studio.sh
-./studio.sh               # deps, release binary, then start
-./studio.sh --stop
+./studio.sh --install desktop
+./studio.sh --install server
 ./studio.sh --start
+./studio.sh --start headless
+./studio.sh --makepass
+./studio.sh --makekey
+./studio.sh --stop
 ./studio.sh --restart
-./studio.sh --install     # Node, Rust, ffmpeg, mpv/VLC (apt/dnf/pacman or brew); build
-./studio.sh --shortcuts   # Desktop + applications menu
-./studio.sh --uninstall   # stop, remove shortcuts + launchable; optional tools (keeps ./data)
+./studio.sh --shortcuts
+./studio.sh --uninstall          # keeps ./data
 ```
 
-The script sets `EPG_MONSTER_HOME` to the repo so SQLite, logs, and cache are
-`./data`. **`--install`** checks Node, Rust, ffmpeg/ffprobe, mpv, VLC, and (on Linux)
-GTK/WebKit, prompts to install anything missing, then **builds a release launchable**
-next to the repo (`epg-monster-studio.exe` / `epg-monster-studio`). **`--shortcuts`**
-pins that file on the Desktop and in the Start Menu (Windows) or applications menu
-(Linux / macOS `~/Applications`). Splash still **checks** tools; it does not
-download them. ffmpeg is required; mpv and VLC are optional Play engines (not shipped).
+No args (`.\studio.ps1` / `./studio.sh`) is **install desktop then start**.
+
+The script sets `EPG_MONSTER_HOME` to the repo so SQLite, logs, cache, web login,
+and API keys are `./data`. ffmpeg is required; mpv and VLC are optional Play
+engines. **`--makekey` / `--makepass` / `--start headless` refuse a desktop
+install.** Open the web UI at **http://127.0.0.1:1420**, never `http://0.0.0.0:1420`.
 
 **`--install` package managers**
 
 | OS | How missing tools are offered |
 |----|-------------------------------|
-| Windows | Scoop first (installs Scoop if you agree), then winget |
+| Windows | Node/Rust: winget. ffmpeg/mpv/VLC: Scoop first, then winget |
 | Linux | `apt-get`, `dnf`, or `pacman` — each step asks, then `sudo` |
 | macOS | Homebrew (installs brew if you agree). VLC is a brew cask |
 
-**`--uninstall`** stops the app and, with prompts, can remove shortcuts, the copied
-launchable, Node, Rust, ffmpeg, mpv, and VLC. **`./data` is never deleted.** G-houl
-Player is **v3**.
+**`--uninstall`** stops the app and, with prompts, can remove shortcuts and
+launchables. **`./data` is never deleted** (including `web-auth.json` and
+`api-keys.json`).
 
 Linux compile packages if you prefer apt yourself:
 
@@ -104,7 +109,7 @@ GNOME tray needs an AppIndicator extension; XFCE uses Status Tray.
 
 ### Linux `.deb` and AppImage
 
-GitHub Actions on a `v2.*` tag builds the **`.deb`** and the **AppImage**.
+GitHub Actions on a `v2.*` or `v3.*` tag builds the **`.deb`** and the **AppImage**.
 
 ```bash
 sudo apt install ./epg.monster-studio_*.deb
@@ -124,12 +129,13 @@ in the git checkout.
 
 ## Data folder
 
-v2 always uses **`{launch folder}/data`** (the repo when you use `studio.ps1` / `studio.sh`,
-or the directory that contains the binary). Never `%LocalAppData%`, never
-`~/.local/share`, never `~/Library/Application Support`. Those locations are v3.
+Installs always use **`{launch folder}/data`** (the repo when you use
+`studio.ps1` / `studio.sh`, or the directory that contains the binary). Never
+`%LocalAppData%`, never `~/.local/share`, never `~/Library/Application Support`.
 
 That folder holds `epg.monster-studio.db`, `auditprocess.db`, `logs/`, `logo/`,
-`offline-slates/`, `cache/`, `tool-cache/`.
+`offline-slates/`, `cache/`, `tool-cache/`, and on a server host `web-auth.json`
+and `api-keys.json`.
 
 ---
 
@@ -138,21 +144,22 @@ That folder holds `epg.monster-studio.db`, `auditprocess.db`, `logs/`, `logo/`,
 Nav footer **Check For Updates** (above Settings):
 
 1. Reads the latest GitHub Release tag for this repo.
-2. If it is newer than the running `v2.0.2`, **Open GitHub release** installs
+2. If it is newer than the running `v3.0.0`, **Open GitHub release** installs
    the matching `.deb` / AppImage (Linux) or you pull and run `studio.ps1` / `studio.sh`.
 3. If you are already current, or GitHub is unreachable / has no release yet,
    the status line says so. It does not crash. The repo is **public**.
 
 Splash also checks when Settings → **Check for app updates on splash** is on.
 
-Silent in-app replace + relaunch is **v3** (updater signing key). Testers use
-`.\studio.ps1 --restart` / `./studio.sh --restart` or a new `.deb` / AppImage.
+**Install and relaunch** (Check For Updates) replaces the binary from a GitHub
+Release when that release has a matching file. Otherwise use
+`.\studio.ps1 --restart` / `./studio.sh --restart`.
 
 ---
 
 ## Run from source
 
-Same as [Install (v2 testers)](#install-v2-testers): `.\studio.ps1` / `./studio.sh`.
+Same as [Install (v3)](#install-v3): `.\studio.ps1` / `./studio.sh`. See [INSTALL.md](INSTALL.md).
 Equivalent: `npm run build` then `EPG_MONSTER_HOME=$(pwd) cargo run --features custom-protocol --manifest-path src-tauri/Cargo.toml`. On Windows add `--target x86_64-pc-windows-gnu`. That is the Rust `.exe` / binary with the UI in `dist/` — not a website, not `tauri dev`.
 
 Windows GNU rustc (no MSVC `link.exe`):
@@ -168,32 +175,28 @@ cd src-tauri
 cargo test -p studio-core
 ```
 
-Linux `.deb` and AppImage locally:
+Linux `.deb` and AppImage locally (optional):
 
 ```bash
 export CARGO_TARGET_DIR="$(pwd)/src-tauri/target"
 npx tauri build --bundles deb,appimage
 ```
 
-Artifacts land in `src-tauri/target/release/bundle/` (`epg.monster-studio_2.0.2_amd64.deb` and `.AppImage`). GitHub Release on a `v2.*` tag attaches those files. `./studio.sh --install` is the two-pane tester flow (fixed step table on top, log below), not the package.
-
-Windows NSIS and signed dmg are **[v3](docs/V3.md)**.
 
 ---
 
 ## GitHub Actions
 
 - `.github/workflows/ci.yml` — `cargo test -p studio-core` on Windows, Ubuntu, macOS (`master`).
-- `.github/workflows/release.yml` — on tag `v2.*` (or **Run workflow**), builds
-  the Linux **`.deb`** and **AppImage** and attaches them to the GitHub Release.
-  NSIS / dmg are v3. Tag `v2.0.2` is the source release (Check For Updates);
-  Linux packages attach on the next `v2.*` tag after this workflow is on GitHub.
+- `.github/workflows/release.yml` — on tag `v3.*` (or **Run workflow**), builds
+  the Linux **`.deb`** and **AppImage** and Windows portable `epg-monster-studio.exe` /
+  `studio-server.exe` / `studio-web-dist.zip` for **Install and relaunch**.
 
 Create a release:
 
 ```bash
-git tag v2.0.3
-git push origin v2.0.3
+git tag v3.0.0
+git push origin v3.0.0
 ```
 
 LAN / Advertise trust model: [docs/LAN.md](docs/LAN.md).
@@ -211,6 +214,7 @@ LAN / Advertise trust model: [docs/LAN.md](docs/LAN.md).
 | **Stream Audit** | Serial ffmpeg/ffprobe probes. Auto-swap. Weekly groups. |
 | **Managed Output** | Export, tuner lineup, upload channels.json (ids only — never stream URLs). |
 | **TV Tuner** | Plex / Jellyfin / Emby / IPTV. Ports 8080–8083. |
+| **IPTV Player** | G-houl embed (desktop). |
 | **Check For Updates** | GitHub Releases latest vs this 2026 edition build. |
-| **Settings** | Players, ffmpeg, members key, remux, weekly audit, splash update check. |
+| **Settings** | This computer / This host, Studio, Account (web login, API keys), Advanced. Desktop can Connect to a remote studio. |
 

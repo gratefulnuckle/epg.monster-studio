@@ -115,6 +115,18 @@ pub struct EpgCacheMeta {
     pub last_modified: Option<String>,
 }
 
+/// Skip a now-playing reindex only when enough mapped lineup channels have a
+/// covering programme. A thin leftover window (e.g. 159 vs 2042) is not done.
+pub fn now_playing_coverage_is_enough(covering: i32, managed_with_tvg: i32) -> bool {
+    if covering <= 0 {
+        return false;
+    }
+    if managed_with_tvg <= 0 {
+        return true;
+    }
+    covering * 2 >= managed_with_tvg
+}
+
 impl EpgCacheMeta {
     pub fn index_is_fresh(&self, max_age_secs: i64) -> bool {
         let Some(raw) = self.last_index_at.as_deref() else {
@@ -552,19 +564,25 @@ pub fn build_epg_audit(channels: &[ManagedChannel], catalog: &[CatalogEntry]) ->
     }
     let mut by_exact_norm: HashMap<String, &CatalogEntry> = HashMap::new();
     let mut by_word: HashMap<String, Vec<(&CatalogEntry, String)>> = HashMap::new();
+    let mut by_id_key: HashMap<String, Vec<&CatalogEntry>> = HashMap::new();
     for c in catalog {
         let norm = normalize(&c.name);
-        if norm.is_empty() {
-            continue;
-        }
-        by_exact_norm.entry(norm.clone()).or_insert(c);
-        for word in norm.split_whitespace() {
-            if word.len() < 3 {
-                continue;
+        if !norm.is_empty() {
+            by_exact_norm.entry(norm.clone()).or_insert(c);
+            for word in norm.split_whitespace() {
+                if word.len() < 3 {
+                    continue;
+                }
+                let bucket = by_word.entry(word.to_string()).or_default();
+                if bucket.len() < 40 {
+                    bucket.push((c, norm.clone()));
+                }
             }
-            let bucket = by_word.entry(word.to_string()).or_default();
-            if bucket.len() < 40 {
-                bucket.push((c, norm.clone()));
+        }
+        for key in catalog_id_keys(&c.tvg_id) {
+            let bucket = by_id_key.entry(key).or_default();
+            if bucket.len() < 40 && !bucket.iter().any(|e| e.tvg_id == c.tvg_id) {
+                bucket.push(c);
             }
         }
     }
@@ -602,7 +620,14 @@ pub fn build_epg_audit(channels: &[ManagedChannel], catalog: &[CatalogEntry]) ->
                 }
                 row.status = "unknown".into();
             }
-            apply_best_fuzzy(&mut row, &ch.name, &by_exact_norm, &by_word);
+            apply_best_fuzzy(
+                &mut row,
+                &ch.name,
+                ch.tvg_id.as_deref(),
+                &by_exact_norm,
+                &by_word,
+                &by_id_key,
+            );
             row
         })
         .collect();
@@ -615,26 +640,86 @@ pub fn build_epg_audit(channels: &[ManagedChannel], catalog: &[CatalogEntry]) ->
     rows
 }
 
+fn catalog_id_keys(tvg_id: &str) -> Vec<String> {
+    let lower = tvg_id.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return Vec::new();
+    }
+    let head = lower.split(['.', ' ', '(']).next().unwrap_or(&lower);
+    let mut keys = Vec::new();
+    let mut push = |s: String| {
+        if s.len() >= 3 && !keys.iter().any(|k| k == &s) {
+            keys.push(s);
+        }
+    };
+    push(head.to_string());
+    let compact: String = head.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    push(compact);
+    let mut letters = String::new();
+    for c in head.chars() {
+        if c.is_ascii_alphabetic() {
+            letters.push(c);
+        } else if !letters.is_empty() {
+            break;
+        }
+    }
+    push(letters);
+    keys
+}
+
+fn id_prefix_score(query: &str, tvg_id: &str) -> f64 {
+    let q: String = query
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let head = tvg_id.split(['.', ' ', '(']).next().unwrap_or(tvg_id);
+    let h: String = head
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if q.len() < 3 || h.is_empty() {
+        return 0.0;
+    }
+    if q == h {
+        return 0.97;
+    }
+    if h.starts_with(&q) && q.len() >= 4 {
+        let mut s = 0.88 + 0.08 * (q.len() as f64 / h.len().max(1) as f64);
+        let idl = tvg_id.to_ascii_lowercase();
+        if idl.contains(".us") {
+            s += 0.03;
+        }
+        if idl.contains("locals") {
+            s += 0.02;
+        }
+        return s.min(0.97);
+    }
+    0.0
+}
+
 fn apply_best_fuzzy(
     row: &mut EpgAuditRow,
     name: &str,
+    current_tvg: Option<&str>,
     by_exact_norm: &HashMap<String, &CatalogEntry>,
     by_word: &HashMap<String, Vec<(&CatalogEntry, String)>>,
+    by_id_key: &HashMap<String, Vec<&CatalogEntry>>,
 ) {
     let norm = normalize(name);
-    if norm.is_empty() {
-        return;
+    if !norm.is_empty() {
+        if let Some(exact) = by_exact_norm.get(&norm) {
+            row.suggested_tvg_id = Some(exact.tvg_id.clone());
+            row.suggested_name = Some(exact.name.clone());
+            row.suggested_logo = exact.logo.clone();
+            row.score = 0.98;
+            row.second_score = 0.0;
+            row.match_kind = Some("fuzzy".into());
+            return;
+        }
     }
-    if let Some(exact) = by_exact_norm.get(&norm) {
-        row.suggested_tvg_id = Some(exact.tvg_id.clone());
-        row.suggested_name = Some(exact.name.clone());
-        row.suggested_logo = exact.logo.clone();
-        row.score = 0.98;
-        row.second_score = 0.0;
-        row.match_kind = Some("fuzzy".into());
-        return;
-    }
-    let mut candidates: HashMap<String, (&CatalogEntry, String)> = HashMap::new();
+    let mut candidates: HashMap<String, &CatalogEntry> = HashMap::new();
     for word in norm.split_whitespace() {
         if word.len() < 3 {
             continue;
@@ -642,22 +727,52 @@ fn apply_best_fuzzy(
         if let Some(bucket) = by_word.get(word) {
             for item in bucket {
                 if !item.0.tvg_id.is_empty() {
-                    candidates.entry(item.0.tvg_id.clone()).or_insert((item.0, item.1.clone()));
+                    candidates.entry(item.0.tvg_id.clone()).or_insert(item.0);
                 }
             }
         }
-        if candidates.len() >= 120 {
+    }
+    let mut keys = catalog_id_keys(name);
+    if let Some(id) = current_tvg {
+        keys.extend(catalog_id_keys(id));
+        for alias in tvg_lookup_ids(id) {
+            keys.extend(catalog_id_keys(&alias));
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    for key in &keys {
+        if let Some(bucket) = by_id_key.get(key) {
+            for c in bucket {
+                if !c.tvg_id.is_empty() {
+                    candidates.entry(c.tvg_id.clone()).or_insert(*c);
+                }
+            }
+        }
+        if candidates.len() >= 200 {
             break;
         }
     }
     if candidates.is_empty() {
         return;
     }
+    let compact: String = norm.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     let mut best: Option<&CatalogEntry> = None;
     let mut best_score = 0.0;
     let mut second = 0.0;
-    for (_, (c, n)) in candidates {
-        let score = similarity(&norm, &n);
+    for c in candidates.into_values() {
+        let name_score = if norm.is_empty() {
+            0.0
+        } else {
+            similarity(&norm, &normalize(&c.name))
+        };
+        let mut id_score = id_prefix_score(&compact, &c.tvg_id);
+        if id_score == 0.0 {
+            for key in &keys {
+                id_score = id_score.max(id_prefix_score(key, &c.tvg_id));
+            }
+        }
+        let score = name_score.max(id_score);
         if score > best_score {
             second = best_score;
             best_score = score;
@@ -893,6 +1008,7 @@ mod tests {
             sort_order: 0,
             tvg_shift_hours: 0.0,
             in_tuner: false,
+            hidden: false,
             tuner_number: None,
             variants: vec![],
             has_epg_match: false,
@@ -901,6 +1017,37 @@ mod tests {
         assert_eq!(rows[0].status, "matched");
         assert_eq!(rows[0].suggested_tvg_id.as_deref(), Some("CNN.us"));
         assert_eq!(rows[0].match_kind.as_deref(), Some("exact"));
+    }
+
+    #[test]
+    fn callsign_kbfx_suggests_locals_catalog_id() {
+        let catalog = [crate::models::CatalogEntry {
+            tvg_id: "KBFX-CD.us_locals1".into(),
+            name: "FOX 58 Bakersfield".into(),
+            logo: None,
+            section: "US".into(),
+        }];
+        let ch = ManagedChannel {
+            id: "1".into(),
+            name: "KBFX".into(),
+            group_title: "US Locals".into(),
+            tvg_id: None,
+            tvg_logo: None,
+            notes: None,
+            sort_order: 0,
+            tvg_shift_hours: 0.0,
+            in_tuner: false,
+            hidden: false,
+            tuner_number: None,
+            variants: vec![],
+            has_epg_match: false,
+        };
+        let rows = build_epg_audit(&[ch], &catalog);
+        assert_eq!(
+            rows[0].suggested_tvg_id.as_deref(),
+            Some("KBFX-CD.us_locals1")
+        );
+        assert!(rows[0].score >= 0.85);
     }
 
     #[test]
@@ -959,6 +1106,21 @@ mod tests {
                 .unwrap(),
         );
         assert!(!m.index_is_fresh(REFRESH_INTERVAL_SECS));
+    }
+
+    #[test]
+    fn thin_covering_is_not_enough_to_skip_reindex() {
+        // Live bug: 159 covering rows vs ~2042 mapped lineup channels.
+        assert!(!now_playing_coverage_is_enough(159, 2042));
+        assert!(!now_playing_coverage_is_enough(0, 10));
+        assert!(!now_playing_coverage_is_enough(1, 10));
+    }
+
+    #[test]
+    fn covering_half_the_lineup_is_enough_to_skip_reindex() {
+        assert!(now_playing_coverage_is_enough(1021, 2042));
+        assert!(now_playing_coverage_is_enough(5, 5));
+        assert!(now_playing_coverage_is_enough(1, 0));
     }
 
     #[test]

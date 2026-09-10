@@ -36,8 +36,10 @@ use studio_tuner::host::TunerSnapshot;
 use tauri::{Emitter, Manager};
 use std::sync::Arc;
 
-struct AppState {
-    store: Arc<Mutex<SqliteStore>>,
+mod ghoul;
+
+pub(crate) struct AppState {
+    pub(crate) store: Arc<Mutex<SqliteStore>>,
     audit: Arc<Mutex<audit::ProcessStore>>,
     tuner: Mutex<TunerManager>,
 }
@@ -488,7 +490,7 @@ fn spawn_audit_worker(store: Arc<Mutex<SqliteStore>>) {
     }
 }
 
-fn app_root(app: &tauri::AppHandle) -> std::path::PathBuf {
+pub(crate) fn app_root(app: &tauri::AppHandle) -> std::path::PathBuf {
     let mut hints = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
         hints.push(cwd);
@@ -685,6 +687,8 @@ struct StudioUpdateDto {
     release_url: String,
     notes: Option<String>,
     error: Option<String>,
+    can_apply: bool,
+    asset_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -727,12 +731,15 @@ async fn check_studio_update() -> StudioUpdateDto {
                     t.to_string()
                 }
             });
+            let newer = remote_is_newer(&rel.tag, VERSION);
+            let flavor = studio_core::update::flavor_from_process();
+            let asset = studio_core::update::pick_binary_asset(&rel, flavor);
             StudioUpdateDto {
                 current,
                 display_version: display_version(),
                 edition: EDITION.to_string(),
                 latest: Some(rel.tag.clone()),
-                update_available: remote_is_newer(&rel.tag, VERSION),
+                update_available: newer,
                 release_url: if rel.html_url.is_empty() {
                     GITHUB_RELEASES_LATEST.to_string()
                 } else {
@@ -740,6 +747,8 @@ async fn check_studio_update() -> StudioUpdateDto {
                 },
                 notes,
                 error: None,
+                can_apply: newer && asset.is_some(),
+                asset_name: asset.map(|a| a.name.clone()),
             }
         }
         Err(e) => StudioUpdateDto {
@@ -751,6 +760,8 @@ async fn check_studio_update() -> StudioUpdateDto {
             release_url: GITHUB_RELEASES_LATEST.to_string(),
             notes: None,
             error: Some(e),
+            can_apply: false,
+            asset_name: None,
         },
     }
     })
@@ -764,7 +775,21 @@ async fn check_studio_update() -> StudioUpdateDto {
         release_url: GITHUB_RELEASES_LATEST.to_string(),
         notes: None,
         error: Some(e.to_string()),
+        can_apply: false,
+        asset_name: None,
     })
+}
+
+#[tauri::command]
+async fn apply_studio_update() -> Result<studio_core::update::ApplyPlan, String> {
+    let plan = tauri::async_runtime::spawn_blocking(studio_core::update::stage_update_and_relaunch)
+        .await
+        .map_err(|e| e.to_string())??;
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        std::process::exit(0);
+    });
+    Ok(plan)
 }
 
 #[tauri::command]
@@ -822,7 +847,7 @@ async fn splash_epg_status(state: tauri::State<'_, AppState>) -> Result<SplashEp
 }
 
 #[tauri::command]
-fn open_epg_catalog_window(app: tauri::AppHandle) -> Result<(), String> {
+async fn open_epg_catalog_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(existing) = app.get_webview_window("epg-catalog") {
         let _ = existing.eval(
             "if (!/catalog\\.html/i.test(location.pathname + location.href)) { location.replace('catalog.html'); }",
@@ -848,6 +873,44 @@ fn open_epg_catalog_window(app: tauri::AppHandle) -> Result<(), String> {
     .center()
     .background_color(tauri::window::Color(0x0c, 0x0c, 0x10, 0xff))
     .initialization_script("window.__STUDIO_VIEW='catalog';")
+    .build()
+    .map_err(|e| e.to_string())?;
+    apply_window_chrome(&w, false);
+    let _ = w.show();
+    let _ = w.set_focus();
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_source_search_window(app: tauri::AppHandle, query: String) -> Result<(), String> {
+    let q = query.trim().to_string();
+    if let Some(existing) = app.get_webview_window("source-search") {
+        let _ = existing.emit("source-search-set-query", q.clone());
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let init = format!(
+        "window.__STUDIO_VIEW='source-search';window.__SOURCE_SEARCH_Q={};",
+        serde_json::to_string(&q).unwrap_or_else(|_| "\"\"".into())
+    );
+    let w = tauri::WebviewWindowBuilder::new(
+        &app,
+        "source-search",
+        tauri::WebviewUrl::App("search.html".into()),
+    )
+    .title("Source search")
+    .inner_size(720.0, 780.0)
+    .min_inner_size(420.0, 360.0)
+    .resizable(true)
+    .maximizable(true)
+    .minimizable(true)
+    .decorations(false)
+    .shadow(true)
+    .center()
+    .background_color(tauri::window::Color(0x0c, 0x0c, 0x10, 0xff))
+    .initialization_script(&init)
     .build()
     .map_err(|e| e.to_string())?;
     apply_window_chrome(&w, false);
@@ -1500,6 +1563,65 @@ async fn delete_managed(state: tauri::State<'_, AppState>, id: String) -> Result
 }
 
 #[tauri::command]
+async fn delete_managed_group(
+    state: tauri::State<'_, AppState>,
+    group: String,
+) -> Result<i32, String> {
+    with_store(Arc::clone(&state.store), move |s| {
+        s.delete_managed_group(&group).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn reorder_managed_groups(
+    state: tauri::State<'_, AppState>,
+    titles: Vec<String>,
+) -> Result<(), String> {
+    with_store(Arc::clone(&state.store), move |s| {
+        s.reorder_managed_groups(&titles).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn reorder_managed_channels(
+    state: tauri::State<'_, AppState>,
+    group: String,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    with_store(Arc::clone(&state.store), move |s| {
+        s.reorder_managed_channels(&group, &ids)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn set_channel_hidden(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    hidden: bool,
+) -> Result<(), String> {
+    with_store(Arc::clone(&state.store), move |s| {
+        s.set_channel_hidden(&id, hidden).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn set_group_hidden(
+    state: tauri::State<'_, AppState>,
+    group: String,
+    hidden: bool,
+) -> Result<(), String> {
+    with_store(Arc::clone(&state.store), move |s| {
+        s.set_group_hidden(&group, hidden).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
 fn rename_managed_group(
     state: tauri::State<AppState>,
     old_name: String,
@@ -1507,6 +1629,17 @@ fn rename_managed_group(
 ) -> Result<i32, String> {
     lock_store(&state)?
         .rename_managed_group(&old_name, &new_name)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn apply_managed_group_case(
+    state: tauri::State<AppState>,
+    group: String,
+    upper: bool,
+) -> Result<i32, String> {
+    lock_store(&state)?
+        .apply_managed_group_case(&group, upper)
         .map_err(|e| e.to_string())
 }
 
@@ -2288,17 +2421,25 @@ fn fetch_epg_catalog_inner(
     store: &Arc<Mutex<SqliteStore>>,
     url: Option<String>,
 ) -> Result<String, String> {
-    let settings = {
+    let (settings, reindex_cache) = {
         let g = store.lock().unwrap_or_else(|e| e.into_inner());
         let catalog = g.catalog_count().unwrap_or(0);
         let programmes = g.programme_count().unwrap_or(0);
-        if url.as_deref().map(str::trim).unwrap_or("").is_empty() && catalog > 0 && programmes > 0 {
+        let covering = g.covering_now_count().unwrap_or(0);
+        let managed = g.managed_with_tvg_count().unwrap_or(0);
+        let url_empty = url.as_deref().map(str::trim).unwrap_or("").is_empty();
+        let coverage_ok = epg::now_playing_coverage_is_enough(covering, managed);
+        if url_empty && catalog > 0 && programmes > 0 && coverage_ok {
             return Ok(format!(
-                "using cached {catalog} catalog ids Â· {programmes} programmes"
+                "using cached {catalog} catalog ids · {programmes} programmes"
             ));
         }
-        g.load_settings().map_err(|e| e.to_string())?
+        let reindex = url_empty && catalog > 0 && cache_has_xml() && !coverage_ok;
+        (g.load_settings().map_err(|e| e.to_string())?, reindex)
     };
+    if reindex_cache {
+        return rebuild_now_playing_inner(store);
+    }
     let urls = if let Some(u) = url.filter(|s| !s.trim().is_empty() && !epg::is_epgshare_url(s)) {
         vec![u]
     } else {
@@ -2361,7 +2502,7 @@ fn fetch_epg_catalog_inner(
             .map_err(|e| e.to_string())?;
     }
     Ok(format!(
-        "{} catalog ids Â· {} programmes indexed",
+        "{} catalog ids · {} programmes indexed",
         all_ch.len(),
         all_prog.len()
     ))
@@ -2414,12 +2555,13 @@ fn cache_xml_files() -> Vec<std::path::PathBuf> {
     files.into_iter().take(1).map(|(_, _, p)| p).collect()
 }
 
-fn rebuild_now_playing_inner(store: &Arc<Mutex<SqliteStore>>) -> Result<String, String> {
+pub(crate) fn rebuild_now_playing_inner(store: &Arc<Mutex<SqliteStore>>) -> Result<String, String> {
     {
         let g = store.lock().unwrap_or_else(|e| e.into_inner());
         let covering = g.covering_now_count().unwrap_or(0);
+        let managed = g.managed_with_tvg_count().unwrap_or(0);
         let fresh = g.load_epg_cache_meta().index_is_fresh(6 * 3600);
-        if covering > 0 && fresh {
+        if epg::now_playing_coverage_is_enough(covering, managed) && fresh {
             let n = g
                 .refresh_now_playing_snapshot()
                 .map_err(|e| e.to_string())?;
@@ -2446,7 +2588,7 @@ fn rebuild_now_playing_inner(store: &Arc<Mutex<SqliteStore>>) -> Result<String, 
         .map_err(|e| e.to_string())?;
     let on = g.covering_now_count().unwrap_or(0);
     Ok(format!(
-        "Reindexed {} programmes Â· {on} on now",
+        "Reindexed {} programmes · {on} on now",
         all.len()
     ))
 }
@@ -2467,17 +2609,22 @@ async fn epg_refresh_schedule(
 ) -> Result<String, String> {
     let store = Arc::clone(&state.store);
     tauri::async_runtime::spawn_blocking(move || {
-        let (catalog, programmes, covering, usable, meta, settings) = {
+        let (catalog, programmes, covering, managed, usable, meta, settings) = {
             let s = store.lock().unwrap_or_else(|e| e.into_inner());
             let catalog = s.catalog_count().unwrap_or(0);
             let programmes = s.programme_count().unwrap_or(0);
             let covering = s.covering_now_count().unwrap_or(0);
+            let managed = s.managed_with_tvg_count().unwrap_or(0);
             let usable = catalog > 0 && programmes > 0 && cache_has_xml();
             let meta = s.load_epg_cache_meta();
             let settings = s.load_settings().ok();
-            (catalog, programmes, covering, usable, meta, settings)
+            (catalog, programmes, covering, managed, usable, meta, settings)
         };
-        if only_if_stale && catalog > 0 && programmes > 0 && covering > 0 {
+        if only_if_stale
+            && catalog > 0
+            && programmes > 0
+            && epg::now_playing_coverage_is_enough(covering, managed)
+        {
             return Ok("skipped".into());
         }
         if !usable {
@@ -2496,7 +2643,7 @@ async fn epg_refresh_schedule(
                 Ok("reindexed".into())
             }
             Ok(epg::FetchXmltv::Body { .. }) => {
-                fetch_epg_catalog_inner(&store, None)?;
+                fetch_epg_catalog_inner(&store, Some(url))?;
                 Ok("downloaded".into())
             }
             Err(_) => {
@@ -2532,12 +2679,16 @@ async fn epg_apply(
     tvg_id: String,
     logo: Option<String>,
     apply_logo: bool,
+    tvg_shift_hours: Option<f64>,
 ) -> Result<(), String> {
     with_store(Arc::clone(&state.store), move |store| {
         let Some(mut ch) = store.get_managed(&managed_id).map_err(|e| e.to_string())? else {
             return Err("channel not found".into());
         };
         ch.tvg_id = Some(tvg_id);
+        if let Some(shift) = tvg_shift_hours {
+            ch.tvg_shift_hours = shift;
+        }
         if apply_logo {
             if let Some(l) = logo.filter(|s| !s.is_empty()) {
                 ch.tvg_logo = Some(l);
@@ -2553,6 +2704,8 @@ async fn epg_auto_match(
     state: tauri::State<'_, AppState>,
     groups: Vec<String>,
     min_score: f64,
+    require_unique: Option<bool>,
+    tvg_shift_hours: Option<f64>,
 ) -> Result<i32, String> {
     with_store(Arc::clone(&state.store), move |store| {
         let channels = store
@@ -2564,12 +2717,13 @@ async fn epg_auto_match(
             .into_iter()
             .map(|g| g.trim().to_ascii_lowercase())
             .collect();
+        let unique = require_unique.unwrap_or(false);
         let mut applied = 0;
         for row in rows {
             if !want.contains(&row.group_title.trim().to_ascii_lowercase()) {
                 continue;
             }
-            if !epg::should_auto_apply(&row, min_score, true) {
+            if !epg::should_auto_apply(&row, min_score, unique) {
                 continue;
             }
             if !store.is_known_tvg_id(row.suggested_tvg_id.as_deref()) {
@@ -2580,6 +2734,9 @@ async fn epg_auto_match(
                 .map_err(|e| e.to_string())?
             {
                 ch.tvg_id = row.suggested_tvg_id;
+                if let Some(shift) = tvg_shift_hours {
+                    ch.tvg_shift_hours = shift;
+                }
                 store.upsert_managed(&ch).map_err(|e| e.to_string())?;
                 applied += 1;
             }
@@ -3020,7 +3177,12 @@ fn tuner_snapshot_fn(store: Arc<Mutex<SqliteStore>>) -> Arc<dyn Fn() -> TunerSna
 
 fn make_snapshot(store: &SqliteStore) -> TunerSnapshot {
     let settings = store.load_settings().unwrap_or_default();
-    let channels = store.list_managed(None).unwrap_or_default();
+    let channels: Vec<_> = store
+        .list_managed(None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| !c.hidden)
+        .collect();
     let ids: Vec<String> = studio_core::lineup::ordered_lineup(&channels)
         .into_iter()
         .map(|c| studio_core::hdhr::channel_xml_id(&c))
@@ -3237,6 +3399,7 @@ pub fn run() {
             tuner: Mutex::new(tuner),
         })
         .setup(|app| {
+            studio_core::update::cleanup_stale_update_files();
             studio_core::crash::append_log("Info", "App", "OnLaunched");
             if let Some(w) = app.get_webview_window("main") {
                 apply_window_chrome(&w, true);
@@ -3300,6 +3463,7 @@ pub fn run() {
                 return;
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                ghoul::teardown();
                 api.prevent_close();
                 let _ = window.hide();
                 studio_core::crash::mark_tray_state();
@@ -3312,11 +3476,13 @@ pub fn run() {
             splash_epg_status,
             check_app_update,
             check_studio_update,
+            apply_studio_update,
             open_latest_release,
             host_info,
             check_github_issues,
             promote_main_window,
             open_epg_catalog_window,
+            open_source_search_window,
             detect_bundled_tools,
             studio_tools_status,
             tools_missing,
@@ -3342,7 +3508,13 @@ pub fn run() {
             get_managed,
             save_managed,
             delete_managed,
+            delete_managed_group,
+            reorder_managed_groups,
+            reorder_managed_channels,
+            set_channel_hidden,
+            set_group_hidden,
             rename_managed_group,
+            apply_managed_group_case,
             add_stream,
             delete_variant,
             move_variant,
@@ -3415,6 +3587,20 @@ pub fn run() {
             audit_today_groups,
             audit_mark_today_ran,
             audit_results,
+            ghoul::ghoul_status,
+            ghoul::ghoul_prepare,
+            ghoul::ghoul_mount,
+            ghoul::ghoul_unmount,
+            ghoul::ghoul_set_rect,
+            ghoul::ghoul_play,
+            ghoul::ghoul_stop,
+            ghoul::ghoul_pause,
+            ghoul::ghoul_mute,
+            ghoul::ghoul_volume,
+            ghoul::ghoul_set_engine,
+            ghoul::ghoul_set_ua,
+            ghoul::ghoul_snapshot,
+            ghoul::ghoul_prefs,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| {

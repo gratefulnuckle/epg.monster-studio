@@ -38,10 +38,12 @@ import { logoHtml, mountLogo } from "./logo";
 import { auditHtml, mountAudit } from "./audit";
 import { outputHtml, mountOutput } from "./output";
 import { tunerHtml, mountTuner } from "./tuner";
+import { ghoulHtml, mountGhoul } from "./ghoul";
 import { settingsHtml, mountSettings } from "./settings";
 import { updatesHtml, mountUpdates } from "./updates";
 import { bindVirtualList, type VirtualList } from "./virtual";
 import { bindColResize } from "./split";
+import { runUndo, subscribeSaveStatus } from "./save-status";
 
 const AUDIT_STORE_KEY = "studio-src-audit-v1";
 type ProbeEntry =
@@ -121,6 +123,7 @@ export type NavId =
   | "autoaudit"
   | "output"
   | "tuner"
+  | "ghoul"
   | "updates"
   | "settings";
 
@@ -133,6 +136,7 @@ function navItems(): { id: NavId; label: string; icon?: string; img?: string }[]
     { id: "autoaudit", label: "Stream Audit", icon: "\uE895" },
     { id: "output", label: "Managed Output", icon: "\uE8B7" },
     { id: "tuner", label: "TV Tuner", icon: "\uE7F4" },
+    { id: "ghoul", label: "IPTV Player", img: "/ghoul.png" },
   ];
 }
 
@@ -171,7 +175,12 @@ export function mountShell(root: HTMLElement): { toast: (s: string) => void } {
               <button class="nav-item" data-nav="settings"><span class="nav-icon">&#xE713;</span><span class="nav-label">Settings</span></button>
           </div>
         </aside>
-        <main class="page" id="page"></main>
+        <main class="page" id="page">
+          <div class="header-leds" id="header-leds" aria-live="polite">
+            <span class="header-led" id="led-saved" hidden title="Saved">&#xE73E;</span>
+            <button type="button" class="header-led" id="led-undo" hidden title="Undo last save">&#xE7A7;</button>
+          </div>
+        </main>
       </div>
       <div class="toast" id="toast" data-sev="success">
         <div class="toast-body">
@@ -185,7 +194,7 @@ export function mountShell(root: HTMLElement): { toast: (s: string) => void } {
           <h2>About</h2>
           <img src="/logo.png" alt="epg.monster studio" style="width:96px;height:96px" />
           <p class="chan-name" style="font-size:22px">epg.monster studio</p>
-          <p class="page-sub" id="about-ver">2026 edition · v2.0.2 (dev)</p>
+          <p class="page-sub" id="about-ver">2026 edition · v3.0.0 (dev)</p>
           <div style="text-align:left">
             <p><strong>What it is</strong><br />A Windows workspace for a legal IPTV lineup: import sources, curate channels and backups, match EPG from epg.monster, check logos and streams, then publish a managed playlist or a local virtual tuner.</p>
             <p><strong>Built with</strong><br />Rust and TypeScript, Tauri v2, SQLite (rusqlite). Play uses mpv or VLC from the paths in Settings. Probes use ffmpeg / ffprobe.</p>
@@ -279,54 +288,143 @@ export function mountShell(root: HTMLElement): { toast: (s: string) => void } {
     window.clearTimeout(toastTimer);
   });
 
-  let current: NavId = "audit";
-  let disposePage: (() => void) | undefined;
+  const NAV_IDS: NavId[] = [
+    "audit",
+    "editor",
+    "epg",
+    "logoaudit",
+    "autoaudit",
+    "output",
+    "tuner",
+    "ghoul",
+    "updates",
+    "settings",
+  ];
+  const savedNav = sessionStorage.getItem("studio-nav");
+  let current: NavId = NAV_IDS.includes(savedNav as NavId) ? (savedNav as NavId) : "audit";
+  const panes = new Map<NavId, HTMLElement>();
+  const mounted = new Set<NavId>();
+  const searchByPage: Partial<Record<NavId, string>> = (() => {
+    try {
+      const raw = sessionStorage.getItem("studio-search-by-page");
+      return raw ? (JSON.parse(raw) as Partial<Record<NavId, string>>) : {};
+    } catch {
+      return {};
+    }
+  })();
+  const persistSearchByPage = () => {
+    try {
+      sessionStorage.setItem("studio-search-by-page", JSON.stringify(searchByPage));
+    } catch {
+      /* quota */
+    }
+  };
+  const ghoulStops = new Map<NavId, () => void>();
+
+  const emitSearch = (id: NavId) => {
+    const pane = panes.get(id);
+    if (!pane || !SEARCH_PAGES.includes(id)) return;
+    pane.dispatchEvent(new CustomEvent("studio-search", { detail: search.value }));
+  };
+
+  const relayoutPane = (pane: HTMLElement) => {
+    requestAnimationFrame(() => {
+      pane.querySelectorAll(".virt-inner").forEach((inner) => {
+        inner.parentElement?.dispatchEvent(new Event("studio-relayout"));
+      });
+    });
+  };
+
+  const mountPane = (id: NavId, pane: HTMLElement) => {
+    if (id === "audit") {
+      void mountSources(pane, showToast).then(() => {
+        applyPlayGate(pane);
+        if (search.value.trim().length >= 2) emitSearch(id);
+      });
+    }
+    if (id === "editor") {
+      void mountEditor(pane, showToast).then(() => {
+        applyPlayGate(pane);
+        if (search.value.trim().length >= 2) emitSearch(id);
+      });
+    }
+    if (id === "epg") {
+      void mountEpg(pane, showToast).then((s) => {
+        ghoulStops.set(id, () => s?.());
+      });
+    }
+    if (id === "logoaudit") void mountLogo(pane, showToast);
+    if (id === "autoaudit") void mountAudit(pane, showToast);
+    if (id === "output") {
+      void mountOutput(pane, showToast).then(() => {
+        if (search.value.trim().length >= 2) emitSearch(id);
+      });
+    }
+    if (id === "tuner") {
+      void mountTuner(pane, showToast).then((s) => {
+        ghoulStops.set(id, () => s?.());
+      });
+    }
+    if (id === "ghoul") {
+      void mountGhoul(pane, showToast).then((s) => {
+        ghoulStops.set(id, () => s?.());
+      });
+    }
+    if (id === "updates") void mountUpdates(pane, showToast);
+    if (id === "settings") void mountSettings(pane, showToast);
+    mounted.add(id);
+  };
 
   const render = (id: NavId) => {
     if (id === "autoaudit" && !canStreamAudit()) {
       showToast("Stream Audit needs ffmpeg and ffprobe. Run studio.ps1 / studio.sh --install or set paths in Settings.");
       return;
     }
+    if (current && current !== id) {
+      if (SEARCH_PAGES.includes(current)) {
+        searchByPage[current] = search.value;
+        persistSearchByPage();
+      }
+      const prev = panes.get(current);
+      if (prev) prev.hidden = true;
+      if (current === "ghoul") {
+        ghoulStops.get("ghoul")?.();
+        ghoulStops.delete("ghoul");
+        panes.get("ghoul")?.remove();
+        panes.delete("ghoul");
+        mounted.delete("ghoul");
+      }
+    }
     current = id;
-    disposePage?.();
-    disposePage = undefined;
+    sessionStorage.setItem("studio-nav", id);
     root.querySelectorAll(".nav-item").forEach((el) => {
       el.classList.toggle("active", (el as HTMLElement).dataset.nav === id);
     });
     const hideSearch = !SEARCH_PAGES.includes(id);
     searchWrap.classList.toggle("hidden", hideSearch);
     if (hideSearch) {
-      search.value = "";
       searchWrap.setAttribute("data-tauri-drag-region", "");
     } else {
       searchWrap.removeAttribute("data-tauri-drag-region");
+      search.value = searchByPage[id] ?? "";
     }
-    page.innerHTML = pageHtml(id);
-    if (id === "audit") {
-      void mountSources(page, showToast).then(() => applyPlayGate(page));
+    let pane = panes.get(id);
+    const fresh = !pane;
+    if (!pane) {
+      pane = document.createElement("div");
+      pane.className = "page-pane";
+      pane.dataset.nav = id;
+      pane.innerHTML = pageHtml(id);
+      page.appendChild(pane);
+      panes.set(id, pane);
     }
-    if (id === "editor") {
-      void mountEditor(page, showToast).then(() => applyPlayGate(page));
+    pane.hidden = false;
+    if (fresh || !mounted.has(id)) mountPane(id, pane);
+    else {
+      applyPlayGate(pane);
+      relayoutPane(pane);
+      pane.dispatchEvent(new Event("studio-show"));
     }
-    if (id === "epg") {
-      let stop: (() => void) | undefined;
-      disposePage = () => stop?.();
-      void mountEpg(page, showToast).then((s) => {
-        stop = s;
-      });
-    }
-    if (id === "logoaudit") void mountLogo(page, showToast);
-    if (id === "autoaudit") void mountAudit(page, showToast);
-    if (id === "output") void mountOutput(page, showToast);
-    if (id === "tuner") {
-      let stop: (() => void) | undefined;
-      disposePage = () => stop?.();
-      void mountTuner(page, showToast).then((s) => {
-        stop = s;
-      });
-    }
-    if (id === "updates") void mountUpdates(page, showToast);
-    if (id === "settings") void mountSettings(page, showToast);
   };
 
   root.querySelectorAll<HTMLButtonElement>("[data-nav]").forEach((btn) => {
@@ -353,12 +451,28 @@ export function mountShell(root: HTMLElement): { toast: (s: string) => void } {
   });
   wireCaptionButtons(root);
 
+  const ledSaved = root.querySelector<HTMLElement>("#led-saved");
+  const ledUndo = root.querySelector<HTMLButtonElement>("#led-undo");
+  subscribeSaveStatus((n) => {
+    if (ledSaved) ledSaved.hidden = !n.showSaved;
+    if (ledUndo) {
+      ledUndo.hidden = !n.showUndo;
+      ledUndo.disabled = n.undoCount === 0;
+      ledUndo.title = n.undoCount ? `Undo last save (${n.undoCount})` : "Undo last save";
+    }
+  });
+  ledUndo?.addEventListener("click", () => {
+    void runUndo().catch((e) => showToast(String(e)));
+  });
+
   let searchTimer = 0;
   search.addEventListener("input", () => {
     window.clearTimeout(searchTimer);
     searchTimer = window.setTimeout(() => {
       if (SEARCH_PAGES.includes(current)) {
-        page.dispatchEvent(new CustomEvent("studio-search", { detail: search.value }));
+        searchByPage[current] = search.value;
+        persistSearchByPage();
+        emitSearch(current);
       }
     }, 300);
   });
@@ -366,11 +480,13 @@ export function mountShell(root: HTMLElement): { toast: (s: string) => void } {
     if (ev.key !== "Enter") return;
     window.clearTimeout(searchTimer);
     if (SEARCH_PAGES.includes(current)) {
-      page.dispatchEvent(new CustomEvent("studio-search", { detail: search.value }));
+      searchByPage[current] = search.value;
+      persistSearchByPage();
+      emitSearch(current);
     }
   });
 
-  render("audit");
+  render(current);
   void listen<string>("studio-navigate", (ev) => {
     const id = ev.payload as NavId;
     if (id) render(id);
@@ -441,8 +557,6 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
     handle: splitHandle,
     cssVar: "--src-groups-w",
     storageKey: "studio-src-groups-w",
-    min: 140,
-    max: 560,
     measure: (x, rect) => x - rect.left,
   });
 
@@ -637,6 +751,8 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
   const paintChannels = (chans: Channel[], isSearch: boolean, groupCount?: number) => {
     searching = isSearch;
     lastChans = chans;
+    const pop = page.querySelector<HTMLButtonElement>("#src-popout");
+    if (pop) pop.hidden = !(isSearch && chans.length > 0);
     const addCol = hasManaged ? "" : " no-add";
     chanVirt?.destroy();
     channelsEl.innerHTML = "";
@@ -1195,6 +1311,11 @@ async function mountSources(page: HTMLElement, toast: (s: string) => void): Prom
 
   page.querySelector("#src-refresh-all")?.addEventListener("click", () => void refreshAll());
   page.querySelector("#src-delete-all")?.addEventListener("click", () => void removeAll());
+  page.querySelector("#src-popout")?.addEventListener("click", () => {
+    const q = (page.closest(".shell")?.querySelector<HTMLInputElement>("#search")?.value ?? "").trim();
+    if (q.length < 2) return;
+    void api.openSourceSearchWindow(q).catch((e) => toast(String(e)));
+  });
   page.querySelector("#src-del-no")?.addEventListener("click", () => {
     page.querySelector("#src-del-dlg")?.classList.remove("open");
     pendingRemove = null;
@@ -1326,6 +1447,7 @@ function pageHtml(id: NavId): string {
           <div class="tabs-row">
             <div class="tabs" id="source-tabs"></div>
             <div class="source-row-actions">
+              <button type="button" id="src-popout" hidden title="Open search results in a window">Popout</button>
               <button type="button" class="tab-ico" id="src-refresh-all" title="Refresh all sources">&#xE72C;</button>
               <button type="button" class="tab-ico tab-del" id="src-delete-all" title="Remove all sources">&#xE74D;</button>
             </div>
@@ -1442,6 +1564,8 @@ function pageHtml(id: NavId): string {
       return outputHtml();
     case "tuner":
       return tunerHtml();
+    case "ghoul":
+      return ghoulHtml();
     case "updates":
       return updatesHtml();
     case "settings":

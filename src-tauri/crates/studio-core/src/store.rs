@@ -205,6 +205,7 @@ impl SqliteStore {
         self.ensure_column("managed_channels", "tvg_shift", "REAL NOT NULL DEFAULT 0")?;
         self.ensure_column("managed_channels", "in_tuner", "INTEGER NOT NULL DEFAULT 0")?;
         self.ensure_column("managed_channels", "tuner_number", "INTEGER NULL")?;
+        self.ensure_column("managed_channels", "hidden", "INTEGER NOT NULL DEFAULT 0")?;
         self.ensure_column("stream_variants", "origin_name", "TEXT NULL")?;
         self.ensure_column("stream_variants", "origin_tvg_id", "TEXT NULL")?;
         self.ensure_column("sources", "expires_at", "INTEGER NULL")?;
@@ -879,6 +880,46 @@ impl SqliteStore {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    fn write_sort_orders(&self, chans: &[crate::models::ManagedChannel]) -> Result<(), StoreError> {
+        let tx = self.conn.unchecked_transaction()?;
+        for ch in chans {
+            tx.execute(
+                "UPDATE managed_channels SET sort_order = ?1 WHERE id = ?2",
+                params![ch.sort_order, ch.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn reorder_managed_groups(&self, titles: &[String]) -> Result<(), StoreError> {
+        let mut chans = self.list_managed_opt(None, false)?;
+        crate::lineup::apply_group_order(&mut chans, titles);
+        self.write_sort_orders(&chans)
+    }
+
+    pub fn reorder_managed_channels(&self, group: &str, ids: &[String]) -> Result<(), StoreError> {
+        let mut chans = self.list_managed_opt(None, false)?;
+        crate::lineup::apply_channel_order_in_group(&mut chans, group, ids);
+        self.write_sort_orders(&chans)
+    }
+
+    pub fn set_channel_hidden(&self, id: &str, hidden: bool) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE managed_channels SET hidden = ?1 WHERE id = ?2",
+            params![hidden as i32, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_group_hidden(&self, group: &str, hidden: bool) -> Result<(), StoreError> {
+        self.conn.execute(
+            "UPDATE managed_channels SET hidden = ?1 WHERE group_title = ?2",
+            params![hidden as i32, group],
+        )?;
+        Ok(())
+    }
+
     pub fn list_managed(&self, group: Option<&str>) -> Result<Vec<ManagedChannel>, StoreError> {
         self.list_managed_opt(group, true)
     }
@@ -891,7 +932,7 @@ impl SqliteStore {
     ) -> Result<Vec<ManagedChannel>, StoreError> {
         let mut sql = String::from(
             "SELECT id, name, group_title, tvg_id, tvg_logo, notes, sort_order,
-                    IFNULL(tvg_shift,0), IFNULL(in_tuner,0), tuner_number
+                    IFNULL(tvg_shift,0), IFNULL(in_tuner,0), tuner_number, IFNULL(hidden,0)
              FROM managed_channels",
         );
         if group.is_some() {
@@ -1051,7 +1092,7 @@ impl SqliteStore {
     pub fn get_managed(&self, id: &str) -> Result<Option<ManagedChannel>, StoreError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, name, group_title, tvg_id, tvg_logo, notes, sort_order,
-                    IFNULL(tvg_shift,0), IFNULL(in_tuner,0), tuner_number
+                    IFNULL(tvg_shift,0), IFNULL(in_tuner,0), tuner_number, IFNULL(hidden,0)
              FROM managed_channels WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], read_managed)?;
@@ -1065,12 +1106,13 @@ impl SqliteStore {
 
     pub fn upsert_managed(&self, ch: &ManagedChannel) -> Result<(), StoreError> {
         self.conn.execute(
-            "INSERT INTO managed_channels (id, name, group_title, tvg_id, tvg_logo, notes, sort_order, tvg_shift, in_tuner, tuner_number)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO managed_channels (id, name, group_title, tvg_id, tvg_logo, notes, sort_order, tvg_shift, in_tuner, tuner_number, hidden)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, group_title=excluded.group_title, tvg_id=excluded.tvg_id,
                 tvg_logo=excluded.tvg_logo, notes=excluded.notes, sort_order=excluded.sort_order,
-                tvg_shift=excluded.tvg_shift, in_tuner=excluded.in_tuner, tuner_number=excluded.tuner_number",
+                tvg_shift=excluded.tvg_shift, in_tuner=excluded.in_tuner, tuner_number=excluded.tuner_number,
+                hidden=excluded.hidden",
             params![
                 ch.id,
                 ch.name,
@@ -1081,13 +1123,16 @@ impl SqliteStore {
                 ch.sort_order,
                 ch.tvg_shift_hours,
                 ch.in_tuner as i32,
-                ch.tuner_number
+                ch.tuner_number,
+                ch.hidden as i32
             ],
         )?;
         Ok(())
     }
 
     /// Persist editor Save: blank group → Ungrouped; non-empty primary URL writes the visible variant.
+    /// Existing rows keep their sort_order (editing must not jump the group to the top).
+    /// New rows, or a group change, are placed at the head of that group.
     pub fn save_managed_channel(
         &self,
         ch: &ManagedChannel,
@@ -1100,11 +1145,59 @@ impl SqliteStore {
         } else {
             group.to_string()
         };
+        let prior = self.get_managed(&ch.id)?;
+        let is_new = prior.is_none();
+        let group_changed = prior
+            .as_ref()
+            .map(|old| !old.group_title.trim().eq_ignore_ascii_case(&ch.group_title))
+            .unwrap_or(false);
+        if let Some(old) = prior {
+            ch.sort_order = old.sort_order;
+            ch.hidden = old.hidden;
+            ch.in_tuner = old.in_tuner;
+            ch.tuner_number = old.tuner_number;
+        }
         self.upsert_managed(&ch)?;
+        if is_new || group_changed {
+            let mut all = self.list_managed_opt(None, false)?;
+            crate::lineup::place_channel_at_group_head(&mut all, &ch.id, &ch.group_title);
+            self.write_sort_orders(&all)?;
+        }
         let Some(url) = primary_url.map(str::trim).filter(|s| !s.is_empty()) else {
             return Ok(());
         };
         self.set_visible_url(&ch.id, url)
+    }
+
+    /// Upper/lowercase the group title and every channel name in that group. Sort order is unchanged.
+    pub fn apply_managed_group_case(&self, group: &str, upper: bool) -> Result<i32, StoreError> {
+        let old = group.trim();
+        if old.is_empty() {
+            return Ok(0);
+        }
+        let all = self.list_managed_opt(None, false)?;
+        let mut n = 0i32;
+        for ch in all {
+            if !ch.group_title.trim().eq_ignore_ascii_case(old) {
+                continue;
+            }
+            let new_group = if upper {
+                ch.group_title.to_uppercase()
+            } else {
+                ch.group_title.to_lowercase()
+            };
+            let new_name = if upper {
+                ch.name.to_uppercase()
+            } else {
+                ch.name.to_lowercase()
+            };
+            self.conn.execute(
+                "UPDATE managed_channels SET name = ?1, group_title = ?2 WHERE id = ?3",
+                params![new_name, new_group, ch.id],
+            )?;
+            n += 1;
+        }
+        Ok(n)
     }
 
     fn set_visible_url(&self, managed_id: &str, url: &str) -> Result<(), StoreError> {
@@ -1196,6 +1289,7 @@ impl SqliteStore {
                 sort_order: if e.line_no > 0 { e.line_no } else { i as i32 + 1 },
                 tvg_shift_hours: e.tvg_shift_hours,
                 in_tuner: false,
+                hidden: false,
                 tuner_number: None,
                 variants: vec![],
                 has_epg_match: false,
@@ -1224,6 +1318,14 @@ impl SqliteStore {
         self.conn
             .execute("DELETE FROM managed_channels WHERE id = ?1", params![id])?;
         Ok(())
+    }
+
+    pub fn delete_managed_group(&self, group: &str) -> Result<i32, StoreError> {
+        let n = self.conn.execute(
+            "DELETE FROM managed_channels WHERE group_title = ?1",
+            params![group],
+        )?;
+        Ok(n as i32)
     }
 
     pub fn rename_managed_group(&self, old: &str, new: &str) -> Result<i32, StoreError> {
@@ -1435,6 +1537,7 @@ impl SqliteStore {
             sort_order: entry.line_no,
             tvg_shift_hours: entry.tvg_shift_hours,
             in_tuner: false,
+            hidden: false,
             tuner_number: None,
             variants: vec![],
             has_epg_match: false,
@@ -1731,6 +1834,15 @@ impl SqliteStore {
 
     pub fn covering_now_count(&self) -> Result<i32, StoreError> {
         self.covering_programme_count(time::OffsetDateTime::now_utc())
+    }
+
+    pub fn managed_with_tvg_count(&self) -> Result<i32, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM managed_channels
+             WHERE tvg_id IS NOT NULL AND trim(tvg_id) != ''",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn covering_programme_count(
@@ -2030,6 +2142,7 @@ fn read_managed(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedChannel> {
         sort_order: row.get(6)?,
         tvg_shift_hours: row.get(7)?,
         in_tuner: row.get::<_, i32>(8)? != 0,
+        hidden: row.get::<_, i32>(10)? != 0,
         tuner_number: row.get(9)?,
         variants: vec![],
         has_epg_match: false,
@@ -2408,6 +2521,7 @@ mod tests {
             sort_order: 0,
             tvg_shift_hours: 0.0,
             in_tuner: false,
+            hidden: false,
             tuner_number: None,
             variants: vec![],
             has_epg_match: false,
@@ -2457,6 +2571,7 @@ mod tests {
             sort_order: 0,
             tvg_shift_hours: 0.0,
             in_tuner: false,
+            hidden: false,
             tuner_number: None,
             variants: vec![],
             has_epg_match: false,
@@ -2522,6 +2637,82 @@ mod tests {
         assert_eq!(loaded.variants[0].url, "http://old");
     }
 
+    fn named(id: &str, name: &str, group: &str, sort: i32) -> ManagedChannel {
+        let mut ch = sample_channel(id, group);
+        ch.name = name.into();
+        ch.sort_order = sort;
+        ch
+    }
+
+    #[test]
+    fn save_existing_keeps_sort_order_when_client_sends_zero() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        store.upsert_managed(&named("a1", "A1", "A", 0)).unwrap();
+        store.upsert_managed(&named("b1", "B1", "B", 1)).unwrap();
+        store.upsert_managed(&named("b2", "B2", "B", 2)).unwrap();
+        let mut edit = named("b1", "B1 edited", "B", 0);
+        store.save_managed_channel(&edit, None).unwrap();
+        let all = store.list_managed_opt(None, false).unwrap();
+        let ordered = crate::lineup::playlist_order(&all);
+        let names: Vec<_> = ordered.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["A1", "B1 edited", "B2"]);
+        edit.name = "B1".into();
+        store.save_managed_channel(&edit, None).unwrap();
+        let b1 = store.get_managed("b1").unwrap().unwrap();
+        assert_eq!(b1.sort_order, 1);
+    }
+
+    #[test]
+    fn save_new_channel_in_existing_group_goes_to_group_head() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        store.upsert_managed(&named("a1", "A1", "A", 0)).unwrap();
+        store.upsert_managed(&named("b1", "B1", "B", 1)).unwrap();
+        store.upsert_managed(&named("b2", "B2", "B", 2)).unwrap();
+        store
+            .save_managed_channel(&named("new", "NewB", "B", 0), None)
+            .unwrap();
+        let all = store.list_managed_opt(None, false).unwrap();
+        let ordered = crate::lineup::playlist_order(&all);
+        let names: Vec<_> = ordered.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["A1", "NewB", "B1", "B2"]);
+    }
+
+    #[test]
+    fn save_new_group_appears_first() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        store.upsert_managed(&named("a1", "A1", "A", 0)).unwrap();
+        store.upsert_managed(&named("b1", "B1", "B", 1)).unwrap();
+        store
+            .save_managed_channel(&named("n1", "New", "Zed", 99), None)
+            .unwrap();
+        let all = store.list_managed_opt(None, false).unwrap();
+        let ordered = crate::lineup::playlist_order(&all);
+        let names: Vec<_> = ordered.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["New", "A1", "B1"]);
+    }
+
+    #[test]
+    fn apply_group_case_upper_renames_group_and_channels_keeps_order() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        store.upsert_managed(&named("a1", "A1", "A", 0)).unwrap();
+        store.upsert_managed(&named("b1", "Bbc", "News", 1)).unwrap();
+        store.upsert_managed(&named("b2", "Cnn", "News", 2)).unwrap();
+        let n = store.apply_managed_group_case("News", true).unwrap();
+        assert_eq!(n, 2);
+        let all = store.list_managed_opt(None, false).unwrap();
+        let ordered = crate::lineup::playlist_order(&all);
+        assert_eq!(ordered[0].group_title, "A");
+        assert_eq!(ordered[1].group_title, "NEWS");
+        assert_eq!(ordered[1].name, "BBC");
+        assert_eq!(ordered[2].name, "CNN");
+        assert_eq!(ordered[1].sort_order, 1);
+        assert_eq!(ordered[2].sort_order, 2);
+    }
+
     #[test]
     fn add_from_source_keeps_entry_group() {
         let dir = tempdir().unwrap();
@@ -2559,6 +2750,56 @@ mod tests {
             .add_missing_from_source_entries(&ids, Some("NewsSrc"))
             .unwrap();
         assert_eq!((a2, s2), (0, 2));
+    }
+
+    #[test]
+    fn managed_with_tvg_count_skips_blank_ids() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        store.upsert_managed(&sample_channel("c1", "News")).unwrap();
+        let mut blank = sample_channel("c2", "News");
+        blank.tvg_id = Some("  ".into());
+        store.upsert_managed(&blank).unwrap();
+        let mut none = sample_channel("c3", "News");
+        none.tvg_id = None;
+        store.upsert_managed(&none).unwrap();
+        assert_eq!(store.managed_with_tvg_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn delete_managed_group_removes_only_that_group() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        store.upsert_managed(&sample_channel("c1", "News")).unwrap();
+        store.upsert_managed(&sample_channel("c2", "News")).unwrap();
+        let mut sports = sample_channel("c3", "Sports");
+        sports.name = "ESPN".into();
+        store.upsert_managed(&sports).unwrap();
+        assert_eq!(store.delete_managed_group("News").unwrap(), 2);
+        let left = store.list_managed_opt(None, false).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, "c3");
+    }
+
+    #[test]
+    fn set_channel_and_group_hidden() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("t.db")).unwrap();
+        store.upsert_managed(&sample_channel("c1", "News")).unwrap();
+        store.upsert_managed(&sample_channel("c2", "News")).unwrap();
+        let mut sports = sample_channel("c3", "Sports");
+        sports.name = "ESPN".into();
+        store.upsert_managed(&sports).unwrap();
+        store.set_channel_hidden("c1", true).unwrap();
+        assert!(store.get_managed("c1").unwrap().unwrap().hidden);
+        assert!(!store.get_managed("c2").unwrap().unwrap().hidden);
+        store.set_group_hidden("News", true).unwrap();
+        assert!(store.get_managed("c1").unwrap().unwrap().hidden);
+        assert!(store.get_managed("c2").unwrap().unwrap().hidden);
+        assert!(!store.get_managed("c3").unwrap().unwrap().hidden);
+        store.set_group_hidden("News", false).unwrap();
+        assert!(!store.get_managed("c1").unwrap().unwrap().hidden);
+        assert!(!store.get_managed("c2").unwrap().unwrap().hidden);
     }
 
     #[test]

@@ -4,6 +4,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { bindVirtualList, type VirtualList } from "./virtual";
 import { bindPlayerLogo } from "./logo-src";
 import { bindThreeColSplit } from "./split";
+import { keepGroup, nextIssueId, patchLogoAfterSet } from "./issue-nav";
+import { notifyPhysicalSave } from "./save-status";
 
 export type LogoIssue = {
   managedChannelId: string;
@@ -64,7 +66,12 @@ export function logoHtml(): string {
           <div id="lg-name" class="chan-name"></div>
           <div id="lg-reason" class="chan-sub"></div>
           <div class="logo-preview" id="lg-preview"></div>
-          <div class="field"><label>Logo URL (tvg-logo)</label><input id="lg-url" /></div>
+          <div class="field"><label>Logo URL (tvg-logo)</label>
+            <div class="url-row">
+              <input id="lg-url" />
+              <button type="button" class="url-paste" data-for="lg-url" title="Paste from clipboard">&#xE77F;</button>
+            </div>
+          </div>
           <button class="accent" id="lg-apply">Apply logo URL</button>
           <button id="lg-clear">Clear logo</button>
           <p class="page-sub">Right-click the image → Copy image address (the file, not the page). Prefer direct https PNG/JPEG.</p>
@@ -78,10 +85,15 @@ export function logoHtml(): string {
     </div>
     <p class="page-sub" id="lg-status">Scan logos to detect missing, invalid, and broken (won't load) URLs.</p>
     <div class="dialog-backdrop" id="lg-batch-dlg">
-      <div class="dialog">
+      <div class="dialog dialog-tall">
         <h2>Batch set logos</h2>
-        <div class="field"><label>Logo URL</label><input id="lg-batch-url" /></div>
-        <div id="lg-batch-list" class="editor-list" style="max-height:240px"></div>
+        <div class="field"><label>Logo URL</label>
+          <div class="url-row">
+            <input id="lg-batch-url" />
+            <button type="button" class="url-paste" data-for="lg-batch-url" title="Paste from clipboard">&#xE77F;</button>
+          </div>
+        </div>
+        <div id="lg-batch-list" class="editor-list dialog-scroll"></div>
         <div class="dialog-actions">
           <button id="lg-batch-cancel">Cancel</button>
           <button class="accent" id="lg-batch-go">Set on selected</button>
@@ -170,36 +182,69 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
     paintGroups();
   };
 
-  const paintGroups = () => {
-    const titles = [...new Set(rows.map((r) => r.groupTitle))].filter((t) =>
-      !issuesOnly || rows.some((r) => r.groupTitle === t && r.issue),
+  const issueGroups = () =>
+    [...new Set(rows.map((r) => r.groupTitle))].filter(
+      (t) => !issuesOnly || rows.some((r) => r.groupTitle === t && r.issue),
     );
+
+  const visibleIdsIn = (g: string) =>
+    rows
+      .filter((r) => r.groupTitle === g && (!issuesOnly || r.issue))
+      .map((r) => r.managedChannelId);
+
+  const paintGroups = () => {
+    const titles = issueGroups();
     const el = page.querySelector<HTMLElement>("#lg-groups");
     if (!el) return;
-    if (!titles.includes(group)) group = titles[0] ?? "";
-    if (selected && !titles.includes(selected.groupTitle)) selected = null;
-    groupVirt?.destroy();
-    el.innerHTML = "";
-    groupVirt = bindVirtualList({
-      scroller: el,
-      rowHeight: 36,
-      renderRow: (t) => {
-        const n = rows.filter((r) => r.groupTitle === t && r.issue).length;
-        const b = document.createElement("button");
-        b.className = "group-row" + (t === group ? " active" : "");
-        b.innerHTML = `${esc(t)}<span class="issue-n"> ${n} issues</span>`;
-        b.addEventListener("click", () => {
-          group = t;
-          selected = null;
-          paintGroups();
-          paintDetail();
-        });
-        return b;
-      },
-    });
+    group = keepGroup(titles, group);
+    if (selected && selected.groupTitle !== group) selected = null;
+    if (!groupVirt) {
+      groupVirt = bindVirtualList({
+        scroller: el,
+        rowHeight: 36,
+        renderRow: (t) => {
+          const n = rows.filter((r) => r.groupTitle === t && r.issue).length;
+          const b = document.createElement("button");
+          b.className = "group-row" + (t === group ? " active" : "");
+          b.innerHTML = `${esc(t)}<span class="issue-n"> ${n} issues</span>`;
+          b.addEventListener("click", () => {
+            group = t;
+            selected = null;
+            const chans = page.querySelector<HTMLElement>("#lg-channels");
+            if (chans) chans.scrollTop = 0;
+            paintGroups();
+            paintDetail();
+          });
+          return b;
+        },
+      });
+    }
     groupVirt.setItems(titles);
     paintChannels();
     paintDetail();
+  };
+
+  const commitLogoPatch = (ids: string[], url: string | null) => {
+    const focusId = selected?.managedChannelId ?? ids[0];
+    const g = selected?.groupTitle ?? group;
+    const prevIds = visibleIdsIn(g);
+    const idSet = new Set(ids);
+    rows = rows.map((r) => (idSet.has(r.managedChannelId) ? patchLogoAfterSet(r, url) : r));
+    group = keepGroup(issueGroups(), g);
+    if (issuesOnly && url && focusId) {
+      const nid = nextIssueId(prevIds, focusId);
+      selected = nid ? (rows.find((r) => r.managedChannelId === nid) ?? null) : null;
+    } else if (focusId) {
+      selected = rows.find((r) => r.managedChannelId === focusId) ?? null;
+    }
+    if (selected && selected.groupTitle !== group) {
+      selected = rows.find((r) => r.groupTitle === group && (!issuesOnly || r.issue)) ?? null;
+    }
+    if (!selected && group) {
+      selected = rows.find((r) => r.groupTitle === group && (!issuesOnly || r.issue)) ?? null;
+    }
+    summarize();
+    paintGroups();
   };
 
   const paintChannels = () => {
@@ -294,23 +339,48 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
       toast("Paste a logo URL first");
       return;
     }
+    const id = selected.managedChannelId;
+    const name = selected.channelName;
     try {
-      await invoke("logo_set", { managedId: selected.managedChannelId, url });
-      toast(`Logo saved for ${selected.channelName}`);
-      await reload(false);
+      await invoke("logo_set", { managedId: id, url });
+      notifyPhysicalSave();
+      toast(`Logo saved for ${name}`);
+      commitLogoPatch([id], url);
     } catch (e) {
       toast(String(e));
     }
   });
   page.querySelector("#lg-clear")!.addEventListener("click", async () => {
     if (!selected) return;
+    const id = selected.managedChannelId;
     try {
-      await invoke("logo_set", { managedId: selected.managedChannelId, url: null });
+      await invoke("logo_set", { managedId: id, url: null });
+      notifyPhysicalSave();
       (page.querySelector("#lg-url") as HTMLInputElement).value = "";
       toast("Logo cleared.");
-      await reload(false);
+      commitLogoPatch([id], null);
     } catch (e) {
       toast(String(e));
+    }
+  });
+  page.addEventListener("click", async (ev) => {
+    const btn = (ev.target as HTMLElement).closest(".url-paste") as HTMLButtonElement | null;
+    if (!btn || !page.contains(btn)) return;
+    const id = btn.dataset.for;
+    const input = id ? page.querySelector<HTMLInputElement>(`#${id}`) : null;
+    if (!input) return;
+    try {
+      const text = (await navigator.clipboard.readText()).trim();
+      if (!text) {
+        toast("Clipboard is empty");
+        return;
+      }
+      input.value = text;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      if (id === "lg-url") paintPreview();
+    } catch {
+      toast("Could not read clipboard");
     }
   });
 
@@ -354,9 +424,10 @@ export async function mountLogo(page: HTMLElement, toast: (s: string) => void): 
     }
     try {
       const n = await invoke<number>("logo_batch_set", { ids, url });
+      notifyPhysicalSave();
       batchDlg.classList.remove("open");
       toast(`Set logo on ${n} channels.`);
-      await reload(false);
+      commitLogoPatch(ids, url);
     } catch (e) {
       toast(String(e));
     }

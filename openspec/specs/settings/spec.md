@@ -59,7 +59,7 @@ The system SHALL show **Engine** `ffmpeg` | `VLC` (default ffmpeg), **ffmpeg pro
 - THEN Engine is ffmpeg and profile is `Plex MPEG2 + AC3 (recommended)`
 
 ### Requirement: Logos tile
-The system SHALL show **Logo save directory** placeholder `{app}/data/logo`, `Host the logos folder on the tuner`, `Use local logos in tuner playlists and EPG`.
+The system SHALL show **Logo save directory** placeholder `{app}/data/logo`, `Host the logos folder on the tuner`, `Use local logos in tuner playlists and EPG`, and `Cache a local PNG copy when saving logos`.
 
 #### Scenario: Logo path placeholder
 - GIVEN Settings is open
@@ -94,9 +94,27 @@ The system SHALL show `Open logs folder`, `Open crash reports`, the log path, ch
 - AND there is no **Update epg.monster studio** button on this tile
 
 ### Requirement: Detect and Save
-The system SHALL **Detect bundled tools** (fill mpv/ffmpeg/ffprobe from `tools/` next to the exe) and **Save** persist all tiles to the PascalCase `AppSettings` keys.
+The system SHALL **Detect bundled tools** (fill mpv/ffmpeg/ffprobe from `tools/` next to the exe). Field changes persist automatically (debounced) to the PascalCase `AppSettings` keys. There is no global Save button.
 
 #### Scenario: Round-trip settings JSON
 - GIVEN a settings blob with stored tuner device ids
 - WHEN Settings loads
 - THEN every field shows the stored value (including tuner device ids)
+
+### Requirement: Settings sections
+Settings SHALL use the same page title as other pages (no action buttons on the title row) and section tabs **This computer** / **This host**, **Studio**, **Account** (web or remote), **Advanced**.
+
+#### Scenario: Title does not share a row with Save
+- GIVEN Settings is open
+- WHEN the page renders
+- THEN the heading is `Settings`
+- AND Detect lives inside the Players tile, not beside the title
+
+### Requirement: Desktop remote connect
+Desktop Settings SHALL offer a remote studio URL and API key. Connect talks to that host’s API with `Authorization: Bearer`. Player paths stay on this computer. Headless servers have no web UI; the desktop is how the operator edits.
+
+#### Scenario: Connect with API key
+- GIVEN a running studio-server and a key from `--makekey` or Account → Generate API key
+- WHEN the operator pastes the URL and key and clicks Connect
+- THEN playlist and studio settings load from that host
+- AND Play still uses this computer’s mpv/VLC

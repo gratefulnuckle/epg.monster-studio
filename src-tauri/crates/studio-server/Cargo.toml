@@ -1,0 +1,24 @@
+[package]
+name = "studio-server"
+version = "3.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "HTTP host for the epg.monster studio web UI"
+
+[[bin]]
+name = "studio-server"
+path = "src/main.rs"
+
+[dependencies]
+studio-core = { path = "../studio-core" }
+studio-tuner = { path = "../studio-tuner" }
+axum = { version = "0.7", features = ["multipart"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+futures-util = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }

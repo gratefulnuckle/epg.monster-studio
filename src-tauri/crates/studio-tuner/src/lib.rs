@@ -78,6 +78,7 @@ mod tests {
             sort_order: 0,
             tvg_shift_hours: 0.0,
             in_tuner: true,
+            hidden: false,
             tuner_number: Some(5),
             variants: vec![StreamVariant {
                 id: "v".into(),

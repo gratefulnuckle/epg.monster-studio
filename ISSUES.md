@@ -1,26 +1,54 @@
 # epg.monster studio (Tauri) — freeze / crash audit
 
-**Live board is GitHub, not this file.**
+**Live board is GitHub, not this file.** Operator install: `INSTALL.md`.
 
 ```powershell
 gh issue list --label v2
+gh issue list --label v3
 gh issue list --label openspec
 ```
+
+---
+
+## v3 install / uninstall audit (2026-09-09)
+
+Deep dive of `studio.ps1` / `studio.sh`. **Resolved in the launchers** (same day).
+
+| ID | Issue | Status |
+|----|--------|--------|
+| I-1 | `--uninstall` left `studio-server` | **fixed** — both launchables are removed |
+| I-2 | `--shortcuts` on server ran desktop `--install` | **fixed** — server writes a URL shortcut to `http://127.0.0.1:1420` |
+| I-3 | Missing `flavor` always desktop | **fixed** — infer `server` if only `studio-server` exists; record flavor on server start |
+| I-4 | `studio.sh` MINGW `--stop` missed `studio-server` | **fixed** — `taskkill` both names |
+| I-5 | Flavor switch left the other binary | **fixed** — install of one flavor deletes the other launchable |
+| I-6 | Server install offered mpv/VLC/Scoop | **fixed** — server install is Node, Rust, ffmpeg only |
+| I-7 | Shared pid / two flavors at once | **fixed** — start restarts if the running kind ≠ requested kind |
+| I-8 | Headless `--start` while running was a no-op | **fixed** — mismatches stop then start (including web ↔ headless) |
+| I-9 | GStreamer required on Windows desktop install | **fixed** — optional; IPTV Player embed skips if missing |
+| I-10 | Uninstall note omitted auth/key files | **fixed** — note lists `web-auth.json` / `api-keys.json` (still not deleted) |
+| I-11 | Uninstall left stale `flavor` | **fixed** — flavor cleared when binaries are removed |
+| I-12 | `release.yml` only `v2.*` | **fixed** — also `v3.*` |
+| I-13 | No LAN URL on server start | **fixed** — prints `127.0.0.1` and LAN IPv4s; never `0.0.0.0` as a URL |
+
+Desktop Connect remains a client (no two-way SQLite sync). `*.log` stays gitignored.
+
+---
+
 
 OpenSpec changes: `openspec/changes/<name>/` synced with `.\scripts\openspec-gh.ps1 -Change <name>`.
 New leftover work goes on a GitHub issue. Do not append P1 items here.
 Freeze P1/P2 items below are archive (GitHub #14 closed). v3 stays in `docs/V3.md`.
 
-Historical freezes from 2026-08-18 are below. **Live leftovers** (after the 2026-08-19 pass):
+Historical freezes from 2026-08-18 are below. **v3 leftovers:**
 
 | Item | Status |
 |------|--------|
-| GitHub `gratefulnuckle/epg.monster-studio` | **public** (GPL-3.0) — https://github.com/gratefulnuckle/epg.monster-studio |
-| NSIS / Authenticode / OS AppData | **v3** — see `docs/V3.md` |
+| GitHub `gratefulnuckle/epg.monster-studio` | **public** (GPL-3.0) |
+| NSIS / Authenticode / OS AppData | **cancelled** — `studio.ps1` / `studio.sh` only (`roadmap.md`) |
 | P1-7 close → tray | by design |
-| P1-10 GNU dual RT_MANIFEST | **fixed** — MinGW `default-manifest.o` shadowed so Tauri's is the only RT_MANIFEST |
+| P1-10 GNU dual RT_MANIFEST | **fixed** |
 
-Need a new `studio.ps1 --install` / `--restart` binary to pick up source fixes.
+v3.0.0 product work in this tree is complete (`roadmap.md`). A new `--install` / `--restart` binary is still required to run the latest source.
 
 ---
 
@@ -237,7 +265,7 @@ Do not use `tauri dev` against this 275 MB copied DB until P0-1 and P0-6 are fix
 | P1-1 snapshot 1970–2099 | **fixed** — `list_programmes_nearby` (−6h / +36h) |
 | P1-2 most commands sync | **fixed** — splash/GitHub/members/publish/import/export/logo save/EPG schedule/self-test all `spawn_blocking`; leftover handlers are tiny settings/dialog clicks |
 | P1-3 Settings `Kind: 0` | **fixed** — int-or-string deserializer + test |
-| P1-4 four data dirs | **v2: one folder** — `{launch}/data` only; OS AppData is v3 |
+| P1-4 four data dirs | **fixed** — `{launch}/data` only; OS AppData cancelled |
 | P1-5 Vite localhost | **fixed** |
 | P1-6 splash vs heartbeat | **fixed** — heartbeat starts before splash |
 | P1-7 hide to tray | already toasted when audit runs; tray is by design |
@@ -264,8 +292,6 @@ Do not use `tauri dev` against this 275 MB copied DB until P0-1 and P0-6 are fix
 
 Needs a **new `tauri dev` / release binary** to pick these up. Startup now **purges XMLTV cache files over 256 MB** (HTTP fetch, gzip inflate, and `rebuild_now_playing` use the same cap). Playlist Editor **Info** is a dialog; group rename is an in-place popup (right-click or double-click). Failed DB open shows a MessageBox instead of a silent `expect` panic.
 
-mpv/VLC stay Settings paths only. Authenticode, NSIS, and G-houl are **v3**.
+mpv/VLC stay Settings paths only on desktop. Web Play is in the browser. G-houl is the IPTV Player page. NSIS / Authenticode are **cancelled**.
 
-GitHub push is later.
-
-**Norton / Windows Defender:** unsigned MinGW (`x86_64-pc-windows-gnu`) studio builds are often tagged **Win64.Evo-gen**. Prefer a signed v3 installer, or allow in Norton for local GNU unsigned builds.
+**Norton / Windows Defender:** unsigned MinGW (`x86_64-pc-windows-gnu`) builds are often tagged **Win64.Evo-gen**. Allow the exe in Norton for local GNU builds.

@@ -1,0 +1,18 @@
+[package]
+name = "ghoul-gst"
+version = "3.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "G-houl GStreamer sidecar (built only when GStreamer dev libs are present)"
+
+# Keep this crate out of the studio workspace (needs GStreamer pkg-config).
+[workspace]
+
+[[bin]]
+name = "ghoul-gst"
+path = "src/main.rs"
+
+[dependencies]
+gstreamer = { version = "0.24", features = ["v1_24"] }
+gstreamer-video = { version = "0.24", features = ["v1_24"] }
+url = "2"

@@ -1,10 +1,19 @@
 [workspace]
-members = [".", "crates/studio-core", "crates/studio-tuner"]
+members = [
+    ".",
+    "crates/studio-core",
+    "crates/studio-tuner",
+    "crates/studio-server",
+    "crates/ghoul-guide",
+    "crates/ghoul-play",
+    "crates/ghoul-pane",
+]
+exclude = ["crates/ghoul-gst"]
 resolver = "2"
 
 [package]
 name = "epg-monster-studio"
-version = "2.0.2"
+version = "3.0.0"
 description = "epg.monster studio"
 authors = ["epg.monster"]
 license = "GPL-3.0-or-later"
@@ -22,6 +31,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 studio-core = { path = "crates/studio-core" }
 studio-tuner = { path = "crates/studio-tuner" }
+ghoul-guide = { path = "crates/ghoul-guide" }
+ghoul-play = { path = "crates/ghoul-play" }
+ghoul-pane = { path = "crates/ghoul-pane" }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2.7"
 tauri-plugin-opener = "2.5"
@@ -44,4 +56,10 @@ debug = "line-tables-only"
 [profile.dev.package.studio-core]
 debug = "line-tables-only"
 [profile.dev.package.studio-tuner]
+debug = "line-tables-only"
+[profile.dev.package.ghoul-guide]
+debug = "line-tables-only"
+[profile.dev.package.ghoul-play]
+debug = "line-tables-only"
+[profile.dev.package.ghoul-pane]
 debug = "line-tables-only"

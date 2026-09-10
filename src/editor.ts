@@ -4,6 +4,9 @@ import { api, type ChannelAudit } from "./api";
 import { bindVirtualList, type VirtualList } from "./virtual";
 import { bindPlayerLogo } from "./logo-src";
 import { bindThreeColSplit } from "./split";
+import { TVG_SHIFTS } from "./tvg-shift";
+import { draftToManaged, takeEditorDraft } from "./editor-draft";
+import { notifyPhysicalSave } from "./save-status";
 
 export type Variant = {
   id: string;
@@ -26,6 +29,7 @@ export type Managed = {
   sortOrder: number;
   tvgShiftHours: number;
   inTuner: boolean;
+  hidden?: boolean;
   tunerNumber?: number | null;
   variants: Variant[];
   hasEpgMatch: boolean;
@@ -33,42 +37,12 @@ export type Managed = {
 
 const STARTED_KEY = "studio-editor-started";
 
-const SHIFTS: { hours: number; label: string }[] = [
-  { hours: 0, label: "0    ·  GMT−5  Eastern — New York, Toronto, Bogotá" },
-  { hours: -1, label: "−1   ·  GMT−6  Central — Chicago, Mexico City, Winnipeg" },
-  { hours: -2, label: "−2   ·  GMT−7  Mountain — Denver, Phoenix, Calgary" },
-  { hours: -3, label: "−3   ·  GMT−8  Pacific — Los Angeles, Vancouver, Tijuana" },
-  { hours: -4, label: "−4   ·  GMT−9  Alaska — Anchorage" },
-  { hours: -5, label: "−5   ·  GMT−10 Hawaii — Honolulu, Tahiti" },
-  { hours: -6, label: "−6   ·  GMT−11 Samoa, Midway" },
-  { hours: -7, label: "−7   ·  GMT−12 Baker Island" },
-  { hours: 1, label: "+1   ·  GMT−4  Atlantic — Halifax, Santo Domingo, La Paz" },
-  { hours: 2, label: "+2   ·  GMT−3  São Paulo, Buenos Aires, Montevideo" },
-  { hours: 3, label: "+3   ·  GMT−2  South Georgia / mid-Atlantic" },
-  { hours: 4, label: "+4   ·  GMT−1  Azores, Cape Verde" },
-  { hours: 5, label: "+5   ·  GMT+0  UTC — London, Lisbon, Reykjavik, Accra" },
-  { hours: 6, label: "+6   ·  GMT+1  CET — Paris, Berlin, Rome, Lagos, Madrid" },
-  { hours: 7, label: "+7   ·  GMT+2  EET — Cairo, Athens, Johannesburg, Helsinki" },
-  { hours: 8, label: "+8   ·  GMT+3  Moscow, Istanbul, Riyadh, Nairobi, Kuwait" },
-  { hours: 9, label: "+9   ·  GMT+4  Dubai, Baku, Tbilisi, Mauritius" },
-  { hours: 10, label: "+10  ·  GMT+5  Pakistan (PKT), Maldives, Yekaterinburg" },
-  { hours: 10.5, label: "+10.5 ·  GMT+5:30 India (IST) — Mumbai, Delhi, Colombo" },
-  { hours: 11, label: "+11  ·  GMT+6  Bangladesh, Almaty, Omsk, Bhutan" },
-  { hours: 11.5, label: "+11.5 ·  GMT+6:30 Myanmar, Cocos Islands" },
-  { hours: 12, label: "+12  ·  GMT+7  Bangkok, Jakarta, Ho Chi Minh, Hanoi" },
-  { hours: 13, label: "+13  ·  GMT+8  China, Singapore, Hong Kong, Perth, Manila" },
-  { hours: 14, label: "+14  ·  GMT+9  Japan (JST), Korea (KST), Yakutsk" },
-  { hours: 14.5, label: "+14.5 ·  GMT+9:30 Adelaide, Darwin (ACST)" },
-  { hours: 15, label: "+15  ·  GMT+10 Sydney, Melbourne, Brisbane, Guam" },
-  { hours: 16, label: "+16  ·  GMT+11 Magadan, Solomon Islands, New Caledonia" },
-  { hours: 17, label: "+17  ·  GMT+12 Auckland, Fiji, Kamchatka, Marshall Islands" },
-  { hours: 18, label: "+18  ·  GMT+13 Tonga, Samoa (DST), Phoenix Islands" },
-];
+
 
 export function editorHtml(): string {
   return `
     <h1 class="page-title">Playlist Editor</h1>
-    <p class="page-sub">1) Load or create a curated playlist  2) Pick group → channel  3) Edit metadata / type tvg-id for EPG suggestions  4) Add stream backups manually below.  Right-click a group to rename.</p>
+    <p class="page-sub">1) Load or create a curated playlist  2) Pick group → channel  3) Edit metadata / type tvg-id for EPG suggestions  4) Add stream backups manually below.  Right-click a group to rename. Drag the left grip to reorder. Eye hides a group or channel from export and the player.</p>
     <div class="source-bar">
       <fieldset class="player-field">
         <legend>Video Player</legend>
@@ -90,8 +64,12 @@ export function editorHtml(): string {
       <button class="accent" id="ed-load" title="Import your curated m3u/m3u8 as the base list">Load curated playlist</button>
       <button id="ed-add-from" title="Add channels that are missing from your curated list (does not auto-add stream backups)">Add channels from sources</button>
       <button id="ed-export">Export m3u8</button>
+      <button id="ed-create-group" title="Create a new group at the top of the list">Create Group</button>
+      <button id="ed-create-channel" title="Create a new channel in the selected group">Create Channel</button>
       <span class="page-sub" id="ed-count"></span>
       <div class="source-row-actions">
+        <button type="button" class="tab-ico case-ico" id="ed-group-upper" title="Uppercase this group (name and all channels)">AA</button>
+        <button type="button" class="tab-ico case-ico" id="ed-group-lower" title="Lowercase this group (name and all channels)">aa</button>
         <button type="button" class="tab-ico" id="ed-refresh" title="Refresh playlist">&#xE72C;</button>
         <button type="button" class="tab-ico tab-del" id="ed-clear" title="Remove all channels from the managed playlist">&#xE74D;</button>
       </div>
@@ -104,6 +82,9 @@ export function editorHtml(): string {
       <div class="split-handle" id="ed-split-groups" title="Drag to resize groups"></div>
       <section class="channels editor-pane">
         <div class="chan-head no-add">
+          <span class="col-icon row-gutter" title="Drag"></span>
+          <span class="col-icon row-gutter" title="Hide"></span>
+          <span class="col-icon row-gutter" title="Delete"></span>
           <span class="col-icon">Audit</span>
           <span class="col-icon">Play</span>
           <span>Name <button type="button" class="col-url-show" title="Show URL column">URL</button></span>
@@ -113,11 +94,17 @@ export function editorHtml(): string {
       </section>
       <div class="split-handle" id="ed-split-chans" title="Drag to resize channels"></div>
       <section class="tile editor-pane" id="ed-form">
-        <div class="groups-head">Edit channel</div>
+        <div class="groups-head" id="ed-form-title">Edit channel</div>
         <p class="page-sub" id="ed-status"></p>
         <p class="page-sub" id="ed-empty">Select a channel.</p>
         <div id="ed-fields" hidden>
-          <div class="field"><label>Name</label><input id="ed-name" /></div>
+          <div class="field"><label>Name</label>
+            <div class="url-row">
+              <input id="ed-name" />
+              <button type="button" class="tab-ico case-ico" id="ed-name-upper" title="Uppercase name">AA</button>
+              <button type="button" class="tab-ico case-ico" id="ed-name-lower" title="Lowercase name">aa</button>
+            </div>
+          </div>
           <div class="field"><label>Group</label><input id="ed-group" placeholder="Type a group name…" list="ed-group-list" /></div>
           <datalist id="ed-group-list"></datalist>
           <div class="field">
@@ -138,11 +125,21 @@ export function editorHtml(): string {
             <div id="ed-now-times" class="chan-sub"></div>
           </div>
           <p class="page-sub">Suggestions + now playing load from the epg.monster catalog. Use timeshift when a West (or other delayed) feed shares an East EPG id.</p>
-          <div class="field"><label>Logo URL (tvg-logo)</label><input id="ed-logo" /></div>
+          <div class="field"><label>Logo URL (tvg-logo)</label>
+            <div class="url-row">
+              <input id="ed-logo" />
+              <button type="button" class="url-paste" data-for="ed-logo" title="Paste from clipboard">&#xE77F;</button>
+            </div>
+          </div>
           <div class="logo-preview" id="ed-logo-preview"></div>
-          <div class="field"><label>Primary stream URL (exported)</label><input id="ed-primary" /></div>
+          <div class="field"><label>Primary stream URL (exported)</label>
+            <div class="url-row">
+              <input id="ed-primary" />
+              <button type="button" class="url-paste" data-for="ed-primary" title="Paste from clipboard">&#xE77F;</button>
+            </div>
+          </div>
           <div class="field"><label>Notes</label><textarea id="ed-notes"></textarea></div>
-          <button class="accent" id="ed-save">Save channel</button>
+          <button id="ed-copy">Copy channel</button>
           <button id="ed-delete">Delete channel</button>
           <div class="stream-backups">
             <h2>Stream + Backups</h2>
@@ -173,8 +170,8 @@ export function editorHtml(): string {
     </div>
     <div class="dialog-backdrop" id="ed-del-dlg">
       <div class="dialog">
-        <h2>Delete channel?</h2>
-        <p class="page-sub" id="ed-del-msg">Remove this channel from the managed playlist?</p>
+        <h2 id="ed-del-title">Delete?</h2>
+        <p class="page-sub" id="ed-del-msg">Are you sure you want to delete and not hide it?</p>
         <div class="dialog-actions">
           <button type="button" id="ed-del-no">Cancel</button>
           <button type="button" class="accent" id="ed-del-yes">Delete</button>
@@ -217,6 +214,26 @@ export function editorHtml(): string {
       <input id="ed-rename-box" />
       <p class="page-sub">Enter to save · Esc or click away to cancel</p>
     </div>
+    <div class="dialog-backdrop" id="ed-new-group-dlg">
+      <div class="dialog">
+        <h2>Create group</h2>
+        <div class="field"><label>Group name</label><input id="ed-new-group-name" placeholder="e.g. News" /></div>
+        <div class="dialog-actions">
+          <button type="button" id="ed-new-group-cancel">Cancel</button>
+          <button type="button" class="accent" id="ed-new-group-go">Create</button>
+        </div>
+      </div>
+    </div>
+    <div class="dialog-backdrop" id="ed-case-dlg">
+      <div class="dialog">
+        <h2 id="ed-case-title">Update this group?</h2>
+        <p class="page-sub" id="ed-case-msg"></p>
+        <div class="dialog-actions">
+          <button type="button" id="ed-case-no">Cancel</button>
+          <button type="button" class="accent" id="ed-case-yes">Apply</button>
+        </div>
+      </div>
+    </div>
   `;
 }
 
@@ -252,7 +269,7 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
   }
 
   const shift = page.querySelector<HTMLSelectElement>("#ed-shift")!;
-  for (const z of SHIFTS) {
+  for (const z of TVG_SHIFTS) {
     const o = document.createElement("option");
     o.value = String(z.hours);
     o.textContent = z.label;
@@ -264,8 +281,10 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
   let allManaged: Managed[] = [];
   let selected: Managed | null = null;
   let draft = false;
+  let draftBackups: { url: string; label?: string | null }[] = [];
   let chanVirt: VirtualList<Managed> | null = null;
-  let groupVirt: VirtualList<{ title: string; count: number }> | null = null;
+  let groupVirt: VirtualList<{ title: string; count: number; hidden: boolean }> | null = null;
+  let groupRows: { title: string; count: number; hidden: boolean }[] = [];
   let lastEdChans: Managed[] = [];
   type EdProbe = { state: "run" } | { state: "done"; text: string; grade: string; until: number };
   const edProbe = new Map<string, EdProbe>();
@@ -419,9 +438,34 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     for (const c of hits) {
       counts.set(c.groupTitle, (counts.get(c.groupTitle) ?? 0) + 1);
     }
+    const rank = new Map<string, number>();
+    for (const c of allManaged) {
+      const k = c.groupTitle;
+      const so = c.sortOrder ?? 0;
+      rank.set(k, Math.min(rank.get(k) ?? so, so));
+    }
+    const hidByGroup = new Map<string, { n: number; hid: number }>();
+    for (const c of allManaged) {
+      const rec = hidByGroup.get(c.groupTitle) ?? { n: 0, hid: 0 };
+      rec.n += 1;
+      if (c.hidden) rec.hid += 1;
+      hidByGroup.set(c.groupTitle, rec);
+    }
     const groups = [...counts.entries()]
-      .map(([title, count]) => ({ title, count }))
-      .sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
+      .map(([title, count]) => {
+        const rec = hidByGroup.get(title);
+        return {
+          title,
+          count,
+          hidden: !!rec && rec.n > 0 && rec.hid === rec.n,
+        };
+      })
+      .sort((a, b) => {
+        const ra = rank.get(a.title) ?? 0;
+        const rb = rank.get(b.title) ?? 0;
+        return ra - rb || a.title.localeCompare(b.title, undefined, { sensitivity: "base" });
+      });
+    groupRows = groups;
     const gEl = page.querySelector<HTMLElement>("#ed-groups");
     const dl = page.querySelector("#ed-group-list");
     if (!gEl || !dl) return;
@@ -443,12 +487,18 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
       scroller: gEl,
       rowHeight: 36,
       renderRow: (g) => {
-        const b = document.createElement("button");
-        b.className = "group-row" + (g.title === group ? " active" : "");
-        b.textContent = `${g.title}  (${g.count})`;
-        b.addEventListener("click", () => {
+        const b = document.createElement("div");
+        b.className =
+          "group-row" + (g.title === group ? " active" : "") + (g.hidden ? " is-hidden" : "");
+        b.dataset.id = g.title;
+        b.innerHTML = `<span class="row-handle" title="Drag to reorder">&#xE76F;</span>
+        <button type="button" class="row-eye" data-group="${esc(g.title)}" data-hidden="${g.hidden ? "1" : "0"}" title="${g.hidden ? "Show group" : "Hide group"}">${g.hidden ? "&#xE8F5;" : "&#xE890;"}</button>
+        <button type="button" class="row-del" data-group="${esc(g.title)}" title="Delete group">&#xE74D;</button>
+        <span class="group-label">${esc(g.title)}</span><span class="group-count">(${g.count})</span>`;
+        b.addEventListener("click", (ev) => {
+          if ((ev.target as HTMLElement).closest(".row-handle, .row-eye, .row-del")) return;
           group = g.title;
-          groupVirt?.setItems(groups);
+          groupVirt?.setItems(groupRows);
           void loadChannels();
         });
         b.addEventListener("contextmenu", (ev) => {
@@ -465,7 +515,7 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     const count = page.querySelector("#ed-count");
     if (count) count.textContent = `${total} channels`;
     if (!group && groups[0]) group = groups[0].title;
-    groupVirt.setItems(groups);
+    groupVirt.setItems(groupRows);
     await loadChannels();
   };
 
@@ -489,9 +539,15 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
         renderRow: (c) => {
           const url = primaryUrl(c);
           const row = document.createElement("div");
-          row.className = "chan-row no-add" + (selected?.id === c.id ? " active" : "");
+          row.className =
+            "chan-row no-add" +
+            (selected?.id === c.id ? " active" : "") +
+            (c.hidden ? " is-hidden" : "");
           row.dataset.id = c.id;
           row.innerHTML = `
+        <span class="row-handle" title="Drag to reorder">&#xE76F;</span>
+        <button type="button" class="row-eye" data-id="${esc(c.id)}" data-hidden="${c.hidden ? "1" : "0"}" title="${c.hidden ? "Show channel" : "Hide channel"}">${c.hidden ? "&#xE8F5;" : "&#xE890;"}</button>
+        <button type="button" class="row-del" data-id="${esc(c.id)}" data-name="${esc(c.name)}" title="Delete channel">&#xE74D;</button>
         <button class="probe" type="button" data-id="${esc(c.id)}" data-url="${esc(url)}" title="Audit this stream">&#xE9E9;</button>
         <button class="play" type="button" data-id="${esc(c.id)}" data-url="${esc(url)}" title="${canPlay() ? "Play stream" : "Install mpv or VLC, or set a player path in Settings"}" ${canPlay() ? "" : "disabled"}>&#xE768;</button>
         <div class="chan-main">
@@ -523,6 +579,55 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     applyPlayGate(page);
   };
 
+  const groupsEl = page.querySelector<HTMLElement>("#ed-groups");
+  const chansEl = page.querySelector<HTMLElement>("#ed-channels");
+  if (groupsEl) {
+    groupsEl.addEventListener("click", (ev) => {
+      const t = ev.target as HTMLElement;
+      const del = t.closest(".row-del") as HTMLElement | null;
+      if (del?.dataset.group) {
+        ev.stopPropagation();
+        askDelete({ kind: "group", title: del.dataset.group });
+        return;
+      }
+      const eye = t.closest(".row-eye") as HTMLElement | null;
+      if (!eye?.dataset.group) return;
+      ev.stopPropagation();
+      const hidden = eye.dataset.hidden !== "1";
+      void invoke("set_group_hidden", { group: eye.dataset.group, hidden })
+        .then(() => reload())
+        .catch((e) => toast(String(e)));
+    });
+    bindRowReorder({
+      scroller: groupsEl,
+      rowSelector: ".group-row",
+      isHandle: (t) => !!t.closest(".row-handle"),
+      onReorder: (fromId, toId, place) => {
+        const titles = groupRows.map((g) => g.title);
+        const next = moveId(titles, fromId, toId, place);
+        if (!next) return;
+        groupRows = next.map((title) => groupRows.find((g) => g.title === title)!).filter(Boolean);
+        groupVirt?.setItems(groupRows);
+        void invoke("reorder_managed_groups", { titles: next }).catch((e) => toast(String(e)));
+      },
+    });
+  }
+  if (chansEl) {
+    bindRowReorder({
+      scroller: chansEl,
+      rowSelector: ".chan-row",
+      isHandle: (t) => !!t.closest(".row-handle"),
+      onReorder: (fromId, toId, place) => {
+        const ids = lastEdChans.map((c) => c.id);
+        const next = moveId(ids, fromId, toId, place);
+        if (!next) return;
+        lastEdChans = next.map((id) => lastEdChans.find((c) => c.id === id)!).filter(Boolean);
+        chanVirt?.setItems(lastEdChans);
+        void invoke("reorder_managed_channels", { group, ids: next }).catch((e) => toast(String(e)));
+      },
+    });
+  }
+
   const edChannels = page.querySelector<HTMLElement>(".channels");
   if (edChannels) {
     edChannels.classList.toggle("hide-url", localStorage.getItem("studio-hide-url-col") === "1");
@@ -540,6 +645,20 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     const row = t.closest(".chan-row") as HTMLElement | null;
     if (!row?.dataset.id) return;
     const id = row.dataset.id;
+    if (t.closest(".row-handle")) return;
+    if (t.closest(".row-del")) {
+      const del = t.closest(".row-del") as HTMLElement;
+      askDelete({ kind: "channel", id, name: del.dataset.name || row.querySelector(".chan-name")?.textContent || "this channel" });
+      return;
+    }
+    if (t.closest(".row-eye")) {
+      const eye = t.closest(".row-eye") as HTMLElement;
+      const hidden = eye.dataset.hidden !== "1";
+      void invoke("set_channel_hidden", { id, hidden })
+        .then(() => reload())
+        .catch((e) => toast(String(e)));
+      return;
+    }
     if (t.classList.contains("play")) {
       if (!canPlay()) {
         toast("Install mpv or VLC, or set a player path in Settings");
@@ -593,9 +712,21 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
   });
 
   const select = async (id: string) => {
+    await flushSave();
     selected = (await invoke<Managed | null>("get_managed", { id })) ?? null;
+    lastSaved = selected
+      ? {
+          channel: selected,
+          primary:
+            selected.variants.find((v) => v.visibility === "visible")?.url ??
+            selected.variants[0]?.url ??
+            "",
+        }
+      : null;
     if (!page.querySelector("#ed-fields")) return;
+    ignoreForm = true;
     await paintForm();
+    ignoreForm = false;
     await loadChannels();
   };
 
@@ -605,10 +736,16 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     if (!selected) {
       empty.hidden = false;
       fields.hidden = true;
+      const formTitle = page.querySelector("#ed-form-title");
+      if (formTitle) formTitle.textContent = "Edit channel";
       return;
     }
     empty.hidden = true;
     fields.hidden = false;
+    const formTitle = page.querySelector("#ed-form-title");
+    if (formTitle) formTitle.textContent = draft ? "Create channel" : "Edit channel";
+    const copyBtn = page.querySelector<HTMLButtonElement>("#ed-copy");
+    if (copyBtn) copyBtn.hidden = draft;
     (page.querySelector("#ed-name") as HTMLInputElement).value = selected.name;
     (page.querySelector("#ed-group") as HTMLInputElement).value = selected.groupTitle;
     (page.querySelector("#ed-tvg") as HTMLInputElement).value = selected.tvgId ?? "";
@@ -717,49 +854,336 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     };
   };
 
-  page.querySelector("#ed-save")!.addEventListener("click", async () => {
-    const ch = gather();
-    if (!ch) return;
-    try {
-      const primary = (page.querySelector("#ed-primary") as HTMLInputElement).value.trim();
-      await invoke("save_managed", { channel: ch, primaryUrl: primary || null });
-      draft = false;
-      toast("Channel saved");
-      selected = await invoke("get_managed", { id: ch.id });
-      group = selected?.groupTitle ?? group;
-      const status = page.querySelector("#ed-status");
-      if (status) status.textContent = "";
-      await reload();
-    } catch (e) {
-      toast(String(e));
-    }
-  });
+  let lastSaved: { channel: Managed; primary: string } | null = null;
+  let ignoreForm = false;
+  let saveTimer = 0;
+  let saveBusy: Promise<void> | null = null;
 
+  const formSnap = (): { channel: Managed; primary: string } | null => {
+    const ch = gather();
+    if (!ch) return null;
+    const primary = (page.querySelector("#ed-primary") as HTMLInputElement).value.trim();
+    return { channel: ch, primary };
+  };
+
+  const sameSnap = (
+    a: { channel: Managed; primary: string } | null,
+    b: { channel: Managed; primary: string } | null,
+  ) =>
+    !!a &&
+    !!b &&
+    a.primary === b.primary &&
+    JSON.stringify({ ...a.channel, variants: [] }) === JSON.stringify({ ...b.channel, variants: [] });
+
+  const flushSave = async () => {
+    window.clearTimeout(saveTimer);
+    saveTimer = 0;
+    if (saveBusy) await saveBusy;
+    const run = async () => {
+      const snap = formSnap();
+      if (!snap || !selected) return;
+      if (sameSnap(snap, lastSaved)) return;
+      const prev = lastSaved;
+      const wasDraft = draft;
+      const backups = wasDraft ? draftBackups.slice() : [];
+      const groupChanged = !!prev && prev.channel.groupTitle !== snap.channel.groupTitle;
+      try {
+        await invoke("save_managed", {
+          channel: snap.channel,
+          primaryUrl: snap.primary || null,
+        });
+        if (wasDraft && backups.length) {
+          for (const v of backups) {
+            await invoke("add_stream", {
+              managedId: snap.channel.id,
+              url: v.url,
+              label: v.label || null,
+            });
+          }
+        }
+        draft = false;
+        draftBackups = [];
+        const status = page.querySelector("#ed-status");
+        if (status) status.textContent = "";
+        notifyPhysicalSave({
+          label: snap.channel.name || "channel",
+          undo: async () => {
+            if (wasDraft) {
+              await invoke("delete_managed", { id: snap.channel.id });
+              if (selected?.id === snap.channel.id) selected = null;
+            } else if (prev) {
+              await invoke("save_managed", {
+                channel: prev.channel,
+                primaryUrl: prev.primary || null,
+              });
+              if (selected?.id === prev.channel.id) {
+                selected = prev.channel;
+                group = prev.channel.groupTitle;
+                ignoreForm = true;
+                await paintForm();
+                ignoreForm = false;
+              }
+            }
+            await reload();
+          },
+        });
+        selected = (await invoke<Managed | null>("get_managed", { id: snap.channel.id })) ?? snap.channel;
+        lastSaved = {
+          channel: selected,
+          primary:
+            selected.variants.find((v) => v.visibility === "visible")?.url ??
+            selected.variants[0]?.url ??
+            snap.primary,
+        };
+        group = selected.groupTitle;
+        if (wasDraft || groupChanged) await reload();
+        else {
+          const i = lastEdChans.findIndex((c) => c.id === selected!.id);
+          if (i >= 0) lastEdChans[i] = selected;
+          refreshChanRows();
+        }
+      } catch (e) {
+        toast(String(e));
+      }
+    };
+    saveBusy = run();
+    try {
+      await saveBusy;
+    } finally {
+      saveBusy = null;
+    }
+  };
+
+  const scheduleSave = () => {
+    if (ignoreForm || !selected) return;
+    window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => void flushSave(), 500);
+  };
+
+  type TrashJob = { kind: "channel"; id: string; name: string } | { kind: "group"; title: string };
+  let trashJob: TrashJob | null = null;
   const delDlg = page.querySelector("#ed-del-dlg")!;
+  const askDelete = (job: TrashJob) => {
+    trashJob = job;
+    const title = page.querySelector("#ed-del-title");
+    const msg = page.querySelector("#ed-del-msg");
+    if (job.kind === "group") {
+      if (title) title.textContent = "Delete group?";
+      if (msg) msg.textContent = `Are you sure you want to delete “${job.title}” and not hide it?`;
+    } else {
+      if (title) title.textContent = "Delete channel?";
+      if (msg) msg.textContent = `Are you sure you want to delete “${job.name}” and not hide it?`;
+    }
+    delDlg.classList.add("open");
+  };
   page.querySelector("#ed-delete")!.addEventListener("click", async () => {
     if (!selected) return;
     if (draft) {
       draft = false;
+      draftBackups = [];
       selected = null;
       const st = page.querySelector("#ed-status");
       if (st) st.textContent = "Draft discarded.";
       await paintForm();
       return;
     }
-    const msg = page.querySelector("#ed-del-msg");
-    if (msg) msg.textContent = `Remove “${selected.name}” from the managed playlist?`;
-    delDlg.classList.add("open");
+    askDelete({ kind: "channel", id: selected.id, name: selected.name });
   });
-  page.querySelector("#ed-del-no")!.addEventListener("click", () => delDlg.classList.remove("open"));
+  const setNameCase = (upper: boolean) => {
+    const box = page.querySelector<HTMLInputElement>("#ed-name");
+    if (!box) return;
+    box.value = upper ? box.value.toUpperCase() : box.value.toLowerCase();
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  page.querySelector("#ed-name-upper")?.addEventListener("click", () => setNameCase(true));
+  page.querySelector("#ed-name-lower")?.addEventListener("click", () => setNameCase(false));
+  page.querySelector("#ed-copy")?.addEventListener("click", () => {
+    if (!selected || draft) return;
+    const primary =
+      selected.variants.find((v) => v.visibility === "visible")?.url ??
+      selected.variants[0]?.url ??
+      "";
+    const backups = selected.variants
+      .filter((v) => v.url && v.url !== primary)
+      .map((v) => ({ url: v.url, label: v.label }));
+    beginDraft(
+      {
+        name: selected.name,
+        groupTitle: selected.groupTitle,
+        tvgId: selected.tvgId,
+        tvgLogo: selected.tvgLogo,
+        url: primary,
+        notes: selected.notes,
+        tvgShiftHours: selected.tvgShiftHours,
+      },
+      backups,
+      true,
+    );
+  });
+  page.querySelector("#ed-create-channel")?.addEventListener("click", () => {
+    beginDraft(
+      {
+        name: "",
+        groupTitle: group || "Ungrouped",
+        tvgId: null,
+        tvgLogo: null,
+        url: "",
+      },
+      undefined,
+      true,
+    );
+  });
+  const newGroupDlg = page.querySelector("#ed-new-group-dlg")!;
+  const newGroupBox = page.querySelector<HTMLInputElement>("#ed-new-group-name")!;
+  page.querySelector("#ed-create-group")?.addEventListener("click", () => {
+    newGroupBox.value = "";
+    newGroupDlg.classList.add("open");
+    window.setTimeout(() => newGroupBox.focus(), 0);
+  });
+  page.querySelector("#ed-new-group-cancel")?.addEventListener("click", () => {
+    newGroupDlg.classList.remove("open");
+  });
+  const createGroup = async () => {
+    const title = newGroupBox.value.trim();
+    if (!title) {
+      toast("Enter a group name");
+      return;
+    }
+    newGroupDlg.classList.remove("open");
+    const id = crypto.randomUUID().replace(/-/g, "");
+    try {
+      await invoke("save_managed", {
+        channel: {
+          id,
+          name: "New channel",
+          groupTitle: title,
+          tvgId: null,
+          tvgLogo: null,
+          notes: null,
+          sortOrder: 0,
+          tvgShiftHours: 0,
+          inTuner: false,
+          hidden: false,
+          tunerNumber: null,
+          variants: [],
+          hasEpgMatch: false,
+        },
+        primaryUrl: null,
+      });
+      group = title;
+      selected = await invoke("get_managed", { id });
+      lastSaved = selected
+        ? { channel: selected, primary: "" }
+        : null;
+      sessionStorage.setItem(STARTED_KEY, "1");
+      notifyPhysicalSave({
+        label: title,
+        undo: async () => {
+          await invoke("delete_managed", { id });
+          if (selected?.id === id) selected = null;
+          await reload();
+          ignoreForm = true;
+          await paintForm();
+          ignoreForm = false;
+        },
+      });
+      await reload();
+      ignoreForm = true;
+      await paintForm();
+      ignoreForm = false;
+    } catch (e) {
+      toast(String(e));
+    }
+  };
+  page.querySelector("#ed-new-group-go")?.addEventListener("click", () => void createGroup());
+  newGroupBox.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      void createGroup();
+    }
+  });
+  const caseDlg = page.querySelector("#ed-case-dlg")!;
+  let caseUpper = true;
+  const askGroupCase = (upper: boolean) => {
+    if (!group) {
+      toast("Select a group first");
+      return;
+    }
+    caseUpper = upper;
+    const title = page.querySelector("#ed-case-title");
+    const msg = page.querySelector("#ed-case-msg");
+    const sample = upper ? group.toUpperCase() : group.toLowerCase();
+    if (title) title.textContent = upper ? "Uppercase this group?" : "Lowercase this group?";
+    if (msg) {
+      msg.textContent =
+        `This changes the group name to “${sample}” and every channel name in the selected group to ${upper ? "UPPERCASE" : "lowercase"}.`;
+    }
+    caseDlg.classList.add("open");
+  };
+  page.querySelector("#ed-group-upper")?.addEventListener("click", () => askGroupCase(true));
+  page.querySelector("#ed-group-lower")?.addEventListener("click", () => askGroupCase(false));
+  page.querySelector("#ed-case-no")?.addEventListener("click", () => caseDlg.classList.remove("open"));
+  page.querySelector("#ed-case-yes")?.addEventListener("click", async () => {
+    caseDlg.classList.remove("open");
+    if (!group) return;
+    try {
+      const n = await invoke<number>("apply_managed_group_case", { group, upper: caseUpper });
+      notifyPhysicalSave();
+      group = caseUpper ? group.toUpperCase() : group.toLowerCase();
+      if (selected && sameGroup(selected.groupTitle, group)) {
+        selected = await invoke("get_managed", { id: selected.id });
+      }
+      toast(
+        n
+          ? `Updated ${n} channel${n === 1 ? "" : "s"} in “${group}”`
+          : "No channels in that group",
+      );
+      await reload();
+      await paintForm();
+    } catch (e) {
+      toast(String(e));
+    }
+  });
+  page.querySelector("#ed-del-no")!.addEventListener("click", () => {
+    trashJob = null;
+    delDlg.classList.remove("open");
+  });
   page.querySelector("#ed-del-yes")!.addEventListener("click", async () => {
     delDlg.classList.remove("open");
-    if (!selected) return;
+    const job = trashJob;
+    trashJob = null;
+    if (!job) return;
     try {
-      await invoke("delete_managed", { id: selected.id });
-      selected = null;
+      if (job.kind === "group") {
+        await invoke("delete_managed_group", { group: job.title });
+        if (sameGroup(group, job.title)) group = "";
+        if (selected && sameGroup(selected.groupTitle, job.title)) selected = null;
+      } else {
+        await invoke("delete_managed", { id: job.id });
+        if (selected?.id === job.id) selected = null;
+      }
       await reload();
     } catch (e) {
       toast(String(e));
+    }
+  });
+  page.querySelector("#ed-fields")?.addEventListener("click", async (ev) => {
+    const btn = (ev.target as HTMLElement).closest(".url-paste") as HTMLButtonElement | null;
+    if (!btn) return;
+    const id = btn.dataset.for;
+    const input = id ? page.querySelector<HTMLInputElement>(`#${id}`) : null;
+    if (!input) return;
+    try {
+      const text = (await navigator.clipboard.readText()).trim();
+      if (!text) {
+        toast("Clipboard is empty");
+        return;
+      }
+      input.value = text;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      if (id === "ed-logo") paintLogo();
+    } catch {
+      toast("Could not read clipboard");
     }
   });
   page.querySelector("#ed-refresh")!.addEventListener("click", () => void reload());
@@ -850,7 +1274,12 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     }
   });
   page.querySelector("#ed-logo")!.addEventListener("input", paintLogo);
-  shift.addEventListener("change", () => void updateMatch());
+  shift.addEventListener("change", () => {
+    void updateMatch();
+    scheduleSave();
+  });
+  page.querySelector("#ed-fields")?.addEventListener("input", () => scheduleSave());
+  page.querySelector("#ed-fields")?.addEventListener("change", () => scheduleSave());
 
   const tvg = page.querySelector<HTMLInputElement>("#ed-tvg")!;
   const sug = page.querySelector<HTMLElement>("#ed-suggest")!;
@@ -863,6 +1292,7 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     const name = page.querySelector<HTMLInputElement>("#ed-name")!;
     if (!name.value.trim()) name.value = h.name;
     void updateMatch();
+    scheduleSave();
   };
   const paintSuggest = () => {
     sug.innerHTML = "";
@@ -917,8 +1347,18 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     if (!url) return;
     try {
       await invoke("add_stream", { managedId: selected.id, url, label: label || null });
+      notifyPhysicalSave();
       (page.querySelector("#ed-new-url") as HTMLInputElement).value = "";
       selected = await invoke("get_managed", { id: selected.id });
+      lastSaved = selected
+        ? {
+            channel: selected,
+            primary:
+              selected.variants.find((v) => v.visibility === "visible")?.url ??
+              selected.variants[0]?.url ??
+              "",
+          }
+        : lastSaved;
       paintStreams();
     } catch (e) {
       toast(String(e));
@@ -1088,35 +1528,50 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     }
   });
 
-  const beginDraft = (entry: { id: string; name: string; groupTitle: string; tvgId?: string | null; tvgLogo?: string | null; url: string }) => {
+  const beginDraft = (
+    entry: {
+      name: string;
+      groupTitle: string;
+      tvgId?: string | null;
+      tvgLogo?: string | null;
+      url: string;
+      notes?: string | null;
+      tvgShiftHours?: number;
+    },
+    extras?: { url: string; label?: string | null }[],
+    keepGroup = false,
+  ) => {
     draft = true;
-    selected = {
-      id: crypto.randomUUID().replace(/-/g, ""),
-      name: entry.name,
-      groupTitle: "Unassigned",
-      tvgId: entry.tvgId ?? null,
-      tvgLogo: entry.tvgLogo ?? null,
-      notes: null,
-      sortOrder: 0,
-      tvgShiftHours: 0,
-      inTuner: false,
-      tunerNumber: null,
-      variants: [
-        {
-          id: "draft-primary",
-          managedChannelId: "",
-          url: entry.url,
-          label: "primary",
-          visibility: "visible",
-          priority: 0,
-        },
-      ],
-      hasEpgMatch: false,
-    };
-    page.querySelector("#ed-status")!.textContent =
-      "New channel draft — set the group, then Save channel.";
+    draftBackups = extras ?? [];
+    selected = draftToManaged(
+      entry,
+      crypto.randomUUID().replace(/-/g, ""),
+      keepGroup ? entry.groupTitle : undefined,
+    );
+    if (selected) {
+      selected.notes = entry.notes ?? null;
+      selected.tvgShiftHours = entry.tvgShiftHours ?? 0;
+    }
+    lastSaved = null;
+    sessionStorage.setItem(STARTED_KEY, "1");
+    applyEmptyState();
+    const status = page.querySelector("#ed-status");
+    if (status) {
+      status.textContent = extras
+        ? "Copy — edit anything, then Save channel to add it."
+        : "New channel draft — set the group, then Save channel.";
+    }
+    ignoreForm = true;
     void paintForm();
-    (page.querySelector("#ed-group") as HTMLInputElement).focus();
+    ignoreForm = false;
+    page.querySelector<HTMLInputElement>("#ed-name")?.focus();
+    page.querySelector("#ed-form")?.scrollIntoView({ block: "nearest" });
+    if (extras) scheduleSave();
+  };
+
+  const consumeDraft = () => {
+    const entry = takeEditorDraft(sessionStorage);
+    if (entry) beginDraft(entry);
   };
 
   page.addEventListener("studio-search", (ev) => {
@@ -1124,14 +1579,13 @@ export async function mountEditor(page: HTMLElement, toast: (s: string) => void)
     void reload().catch((e) => toast(String(e)));
     void refreshBlankCopy();
   });
+  page.addEventListener("studio-show", () => {
+    consumeDraft();
+  });
 
   try {
     await reload();
-    const raw = sessionStorage.getItem("studio-editor-draft");
-    if (raw) {
-      sessionStorage.removeItem("studio-editor-draft");
-      beginDraft(JSON.parse(raw));
-    }
+    consumeDraft();
   } catch (e) {
     toast(String(e));
   }
@@ -1173,4 +1627,124 @@ export function matchesEditorSearch(c: Managed, q: string): boolean {
 
 function sameGroup(a: string, b: string): boolean {
   return a.localeCompare(b, undefined, { sensitivity: "base" }) === 0;
+}
+
+function moveId(
+  ids: string[],
+  fromId: string,
+  toId: string,
+  place: "before" | "after",
+): string[] | null {
+  const from = ids.indexOf(fromId);
+  if (from < 0 || fromId === toId) return null;
+  const next = ids.slice();
+  next.splice(from, 1);
+  let to = next.indexOf(toId);
+  if (to < 0) return null;
+  if (place === "after") to += 1;
+  next.splice(to, 0, fromId);
+  return next;
+}
+
+function bindRowReorder(opts: {
+  scroller: HTMLElement;
+  rowSelector: string;
+  isHandle: (t: HTMLElement) => boolean;
+  onReorder: (fromId: string, toId: string, place: "before" | "after") => void;
+}): void {
+  let dragId = "";
+  let dragged = false;
+  let pointerId = -1;
+  let startY = 0;
+  let drop: { id: string; place: "before" | "after" } | null = null;
+
+  const clearMarks = () => {
+    opts.scroller
+      .querySelectorAll(".drop-before, .drop-after, .dragging")
+      .forEach((el) => el.classList.remove("drop-before", "drop-after", "dragging"));
+  };
+
+  const markDragging = () => {
+    if (!dragId) return;
+    const row = [...opts.scroller.querySelectorAll<HTMLElement>(opts.rowSelector)].find(
+      (el) => el.dataset.id === dragId,
+    );
+    row?.classList.add("dragging");
+  };
+
+  const rowAt = (x: number, y: number): HTMLElement | null => {
+    for (const el of document.elementsFromPoint(x, y)) {
+      const row = (el as HTMLElement).closest?.(opts.rowSelector) as HTMLElement | null;
+      if (row && opts.scroller.contains(row) && row.dataset.id && row.dataset.id !== dragId) {
+        return row;
+      }
+    }
+    return null;
+  };
+
+  const onMove = (ev: PointerEvent) => {
+    if (ev.pointerId !== pointerId) return;
+    if (!dragged && Math.abs(ev.clientY - startY) > 4) dragged = true;
+    if (!dragged) return;
+    ev.preventDefault();
+    const box = opts.scroller.getBoundingClientRect();
+    if (ev.clientY < box.top + 32) opts.scroller.scrollTop -= 16;
+    else if (ev.clientY > box.bottom - 32) opts.scroller.scrollTop += 16;
+    clearMarks();
+    markDragging();
+    const row = rowAt(ev.clientX, ev.clientY);
+    if (!row?.dataset.id) {
+      drop = null;
+      return;
+    }
+    const place: "before" | "after" =
+      ev.clientY < row.getBoundingClientRect().top + row.offsetHeight / 2 ? "before" : "after";
+    row.classList.add(place === "after" ? "drop-after" : "drop-before");
+    drop = { id: row.dataset.id, place };
+  };
+
+  const onUp = (ev: PointerEvent) => {
+    if (ev.pointerId !== pointerId) return;
+    const fromId = dragId;
+    const hit = drop;
+    clearMarks();
+    dragId = "";
+    pointerId = -1;
+    drop = null;
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    if (!dragged || !fromId || !hit || fromId === hit.id) return;
+    opts.onReorder(fromId, hit.id, hit.place);
+  };
+
+  opts.scroller.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0) return;
+    const t = ev.target as HTMLElement;
+    if (!opts.isHandle(t)) return;
+    const row = t.closest(opts.rowSelector) as HTMLElement | null;
+    if (!row?.dataset.id) return;
+    ev.preventDefault();
+    dragId = row.dataset.id;
+    dragged = false;
+    drop = null;
+    pointerId = ev.pointerId;
+    startY = ev.clientY;
+    row.classList.add("dragging");
+    t.setPointerCapture?.(ev.pointerId);
+    window.addEventListener("pointermove", onMove, { passive: false });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  });
+
+  opts.scroller.addEventListener(
+    "click",
+    (ev) => {
+      if (!dragged) return;
+      dragged = false;
+      ev.preventDefault();
+      ev.stopPropagation();
+    },
+    true,
+  );
 }

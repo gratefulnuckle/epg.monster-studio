@@ -10,9 +10,9 @@ SQLite workspace, FTS, settings, caches, and no legacy folder copy.
 The system SHALL pick a data root from the install folder, not from a v1 tree.
 
 1. Let `app_dir` be `EPG_MONSTER_HOME` if set; else a source checkout (`package.json` + `src-tauri` in the cwd); else the directory that contains the executable (on macOS, the folder that contains the `.app` bundle).
-2. Data is always `{app_dir}/data`. v2 does not use OS AppData (`%LocalAppData%`, XDG, Application Support). Those locations are v3.
+2. Data is always `{app_dir}/data`. The app does not use OS AppData (`%LocalAppData%`, XDG, Application Support).
 
-That folder holds `epg.monster-studio.db`, `auditprocess.db`, `logs/`, `logo/`, `offline-slates/`, `cache/`, `tool-cache/`. A **manual** copy of an old DB still opens.
+That folder holds `epg.monster-studio.db`, `auditprocess.db`, `logs/`, `logo/`, `offline-slates/`, `cache/`, `tool-cache/`, and (server) `web-auth.json`, `api-keys.json`. A **manual** copy of an old DB still opens.
 
 #### Scenario: Portable install
 - GIVEN the directory that contains the executable is writable
@@ -73,4 +73,13 @@ The system SHALL store playlists, headers, and keys only on this PC under the us
 #### Scenario: No keys in logs
 - GIVEN a saved access key and a source URL with Authorization
 - WHEN a daily log line or crash report is written
-- THEN the raw `epgm_` key and provider stream URLs do not appear
+- THEN the raw `epgm_` key, `epgs_` desktop API key, and provider stream URLs do not appear
+
+### Requirement: Server auth files
+The web host SHALL persist `{data}/web-auth.json` (salted admin password, `mustChange`) and `{data}/api-keys.json` (salted `epgs_` hashes, never the plaintext). Uninstall MUST NOT delete these files.
+
+#### Scenario: API key hash only
+- GIVEN `--makekey` has run
+- WHEN `api-keys.json` is read
+- THEN it contains `id`, `name`, `salt`, `hash`, `prefix`
+- AND it does not contain the full `epgs_` secret

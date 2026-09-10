@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { isWebHost } from "./bridge/client";
 
 export type StudioCaps = {
   ffmpeg: boolean;
@@ -18,6 +19,7 @@ export function canStreamAudit(): boolean {
 }
 
 export function canPlay(): boolean {
+  if (isWebHost()) return true;
   return caps.mpv || caps.vlc;
 }
 
@@ -47,17 +49,26 @@ export function applyPlayerEngineValue(sel: HTMLSelectElement | null, stored: un
 }
 
 export function applyPlayGate(root: ParentNode): void {
+  const web = isWebHost();
   const on = canPlay();
   root.querySelectorAll<HTMLElement>(".player-field").forEach((el) => {
     el.classList.toggle("is-disabled", !on);
     el.querySelectorAll<HTMLSelectElement>("select").forEach((s) => {
-      s.disabled = !on;
+      s.disabled = !on || web;
     });
-    el.title = on ? "" : "Install mpv or VLC, or set a player path in Settings";
+    el.title = web
+      ? "Play opens in this browser"
+      : on
+        ? ""
+        : "Install mpv or VLC, or set a player path in Settings";
   });
   root.querySelectorAll<HTMLButtonElement>("button.play, button[data-act='play']").forEach((b) => {
     b.disabled = !on;
-    if (!on) b.title = "Install mpv or VLC, or set a player path in Settings";
+    b.title = web
+      ? "Play in this browser"
+      : on
+        ? "Play"
+        : "Install mpv or VLC, or set a player path in Settings";
   });
   root.querySelectorAll(".chan-head .col-icon").forEach((el) => {
     if (el.textContent?.trim() === "Play") el.classList.toggle("is-disabled", !on);

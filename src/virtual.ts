@@ -76,6 +76,11 @@ export function bindVirtualList<T>(opts: {
   };
 
   opts.scroller.addEventListener("scroll", schedule, { passive: true });
+  const onRelayout = () => {
+    lastStart = -1;
+    paint(true);
+  };
+  opts.scroller.addEventListener("studio-relayout", onRelayout);
   const ro =
     typeof ResizeObserver !== "undefined"
       ? new ResizeObserver(() => {
@@ -96,6 +101,7 @@ export function bindVirtualList<T>(opts: {
       if (raf) cancelAnimationFrame(raf);
       raf = 0;
       opts.scroller.removeEventListener("scroll", schedule);
+      opts.scroller.removeEventListener("studio-relayout", onRelayout);
       ro?.disconnect();
       inner.remove();
     },

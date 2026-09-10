@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# v2 portable launcher. Data, logs, and tools live next to this repo
-# (EPG_MONSTER_HOME). NSIS / Authenticode are v3.
+# v3 portable launcher. Data, logs, and tools live next to this repo
+# (EPG_MONSTER_HOME). This script is the installer (no NSIS / no macOS Dev ID).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PIDFILE="$ROOT/.studio-dev.pid"
 LAUNCHABLE="$ROOT/epg-monster-studio"
+SERVER_BIN="$ROOT/studio-server"
+INSTALL_FLAVOR="desktop"
 ICON_PNG="$ROOT/src-tauri/icons/mascot.png"
 TOOL_STATE="$ROOT/.studio-install.json"
 export EPG_MONSTER_HOME="$ROOT"
@@ -478,16 +480,22 @@ usage() {
   banner "help"
   cat <<EOF
   ./studio.sh                 install + start
-  ./studio.sh --install       Node, Rust, ffmpeg, mpv/VLC; Linux GTK/WebKit; build
-  ./studio.sh --shortcuts     Desktop + applications menu
+  ./studio.sh --install              same as --install desktop
+  ./studio.sh --install desktop      Node, Rust, ffmpeg, mpv/VLC, G-houl; build the desktop app
+  ./studio.sh --install server       Node, Rust, ffmpeg; build studio-server (browser UI, no desktop shell)
+  ./studio.sh --shortcuts     desktop: app icon · server: http://127.0.0.1:1420
   ./studio.sh --uninstall     stop, remove shortcuts + launchable; optional tools
-  ./studio.sh --start         build UI, run the launchable
+  ./studio.sh --start                desktop: run the binary · server: serve the web UI on http://127.0.0.1:1420
+  ./studio.sh --start headless       server: API only (no web UI). Connect from desktop with an API key
+  ./studio.sh --makepass             server: temporary admin password for the web UI (must change at first login)
+  ./studio.sh --makekey              server: desktop API key (shown once). Paste it in desktop Settings → Connect
   ./studio.sh --stop          stop
   ./studio.sh --restart       stop then start
   ./studio.sh --help
 
   --install uses apt-get, dnf, or pacman (sudo) on Linux, Homebrew on macOS
-  --uninstall prompts for studio plus Node, Rust, ffmpeg, mpv, VLC
+  --install also offers libmpv, GStreamer, and builds tools/ghoul/ghoul-gst
+  --uninstall prompts for studio plus Node, Rust, ffmpeg, mpv, VLC, libmpv, GStreamer
   ./data is never deleted
   each action writes ./install.log / ./uninstall.log / ./start.log / ...
 EOF
@@ -522,9 +530,11 @@ stop_studio() {
   case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
       taskkill //F //IM epg-monster-studio.exe 2>/dev/null && n=1 || true
+      taskkill //F //IM studio-server.exe 2>/dev/null && n=1 || true
       ;;
     *)
       pkill -f "epg-monster-studio" 2>/dev/null && n=1 || true
+      pkill -f "studio-server" 2>/dev/null && n=1 || true
       ;;
   esac
   if [[ "$n" -gt 0 ]]; then step "app" "stopped" "" "ok"
@@ -621,6 +631,136 @@ json.dump(j, open(p,"w",encoding="utf-8"), indent=2)
 PY
 }
 
+set_install_flavor() {
+  local flavor="$1"
+  python3 - "$TOOL_STATE" "$flavor" <<'PY'
+import json,sys,os,datetime
+p,flavor=sys.argv[1],sys.argv[2]
+j={"written":"","folder":os.path.dirname(os.path.abspath(p)),"tools":{},"flavor":flavor}
+if os.path.isfile(p):
+    try:
+        j=json.load(open(p,encoding="utf-8"))
+    except Exception:
+        pass
+j["flavor"]=flavor
+j["written"]=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+json.dump(j, open(p,"w",encoding="utf-8"), indent=2)
+PY
+}
+
+get_recorded_flavor() {
+  python3 - "$TOOL_STATE" <<'PY'
+import json,sys,os
+p=sys.argv[1]
+if not os.path.isfile(p):
+    print(""); raise SystemExit
+try:
+    j=json.load(open(p,encoding="utf-8"))
+except Exception:
+    print(""); raise SystemExit
+print(j.get("flavor") or "")
+PY
+}
+
+get_install_flavor() {
+  local f
+  f="$(get_recorded_flavor)"
+  if [[ "$f" == server || "$f" == desktop ]]; then
+    printf '%s\n' "$f"
+    return 0
+  fi
+  if [[ -x "$SERVER_BIN" && ! -x "$LAUNCHABLE" ]]; then
+    echo server
+    return 0
+  fi
+  echo desktop
+}
+
+assert_server_feature() {
+  local flag="$1"
+  if [[ "$(get_install_flavor)" == server ]]; then
+    return 0
+  fi
+  echo "Desktop version is installed. $flag is not a feature." >&2
+  exit 1
+}
+
+remove_other_flavor_launchable() {
+  local keep="$1"
+  if [[ "$keep" == server ]]; then
+    if [[ -e "$LAUNCHABLE" ]]; then
+      rm -f "$LAUNCHABLE"
+      step "desktop binary" "removed" "this folder is a server install" "ok"
+    fi
+  else
+    if [[ -e "$SERVER_BIN" ]]; then
+      rm -f "$SERVER_BIN"
+      step "studio-server" "removed" "this folder is a desktop install" "ok"
+    fi
+  fi
+}
+
+studio_running_kind() {
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+      tasklist //FI "IMAGENAME eq studio-server.exe" 2>/dev/null | grep -qi studio-server && { echo server; return 0; }
+      tasklist //FI "IMAGENAME eq epg-monster-studio.exe" 2>/dev/null | grep -qi epg-monster-studio && { echo desktop; return 0; }
+      ;;
+    *)
+      if command -v pgrep >/dev/null 2>&1; then
+        if pgrep -f '[s]tudio-server' >/dev/null 2>&1; then
+          if pgrep -af '[s]tudio-server' 2>/dev/null | grep -q -- '--headless'; then
+            echo headless
+          else
+            echo server
+          fi
+          return 0
+        fi
+        if pgrep -f '[e]pg-monster-studio' >/dev/null 2>&1; then
+          echo desktop
+          return 0
+        fi
+      fi
+      ;;
+  esac
+  if running; then echo unknown; return 0; fi
+  echo ""
+}
+
+ensure_start_mode() {
+  local want="$1" have
+  have="$(studio_running_kind)"
+  if [[ -z "$have" ]]; then
+    return 1
+  fi
+  if [[ "$have" == "$want" ]]; then
+    step "app" "already running" "$have" "ok"
+    return 0
+  fi
+  step "app" "restarting" "$have -> $want" "warn"
+  stop_studio
+  rm -f "$ROOT/data/session.lock"
+  return 1
+}
+
+print_server_urls() {
+  echo "  On this PC:  http://127.0.0.1:1420"
+  echo "  Do not open http://0.0.0.0:1420 (bind address, not a URL)."
+  local ip
+  if have_cmd hostname; then
+    for ip in $(hostname -I 2>/dev/null); do
+      [[ "$ip" == 127.* || "$ip" == 169.254.* || "$ip" == *:* ]] && continue
+      echo "  On the LAN:  http://${ip}:1420"
+    done
+  fi
+  if have_cmd ip; then
+    ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | while read -r ip; do
+      [[ -z "$ip" || "$ip" == 127.* ]] && continue
+      echo "  On the LAN:  http://${ip}:1420"
+    done
+  fi
+}
+
 forget_tool() {
   local key="$1"
   [[ -f "$TOOL_STATE" ]] || return 0
@@ -689,6 +829,7 @@ cargo_env() {
       *) PATH="$HOME/.cargo/bin:$PATH" ;;
     esac
   fi
+  apply_cargo_target_dir
 }
 
 brew_env() {
@@ -970,6 +1111,79 @@ vlc_path() {
   return 1
 }
 
+libmpv_path() {
+  local p n dir mpv
+  for p in \
+    "$ROOT/tools/mpv/libmpv.so.2" \
+    "$ROOT/tools/mpv/libmpv.dylib" \
+    /usr/lib/libmpv.so.2 \
+    /usr/lib/x86_64-linux-gnu/libmpv.so.2 \
+    /usr/lib/aarch64-linux-gnu/libmpv.so.2 \
+    /usr/local/lib/libmpv.dylib \
+    /opt/homebrew/lib/libmpv.dylib
+  do
+    if [[ -f "$p" ]]; then printf '%s\n' "$p"; return 0; fi
+  done
+  if mpv="$(mpv_path)"; then
+    dir="$(dirname "$mpv")"
+    for n in libmpv.so.2 libmpv.dylib; do
+      if [[ -f "$dir/$n" ]]; then printf '%s\n' "$dir/$n"; return 0; fi
+    done
+  fi
+  if have_cmd brew; then
+    p="$(brew --prefix mpv 2>/dev/null || true)/lib/libmpv.dylib"
+    if [[ -f "$p" ]]; then printf '%s\n' "$p"; return 0; fi
+  fi
+  return 1
+}
+
+gst_root() {
+  local d
+  for d in \
+    "$ROOT/tools/gstreamer" \
+    /usr \
+    /usr/local \
+    /Library/Frameworks/GStreamer.framework/Versions/1.0 \
+    "$HOME/Library/Frameworks/GStreamer.framework/Versions/1.0"
+  do
+    if [[ -x "$d/bin/gst-launch-1.0" || -f "$d/lib/libgstreamer-1.0.so.0" || -d "$d/lib/gstreamer-1.0" ]]; then
+      printf '%s\n' "$d"
+      return 0
+    fi
+  done
+  if have_cmd gst-launch-1.0; then
+    dirname "$(dirname "$(command -v gst-launch-1.0)")"
+    return 0
+  fi
+  return 1
+}
+
+ghoul_gst_path() {
+  local p="$ROOT/tools/ghoul/ghoul-gst"
+  if [[ -x "$p" ]]; then printf '%s\n' "$p"; return 0; fi
+  return 1
+}
+
+build_ghoul_gst() {
+  local prefix="${1:-}" exe cand
+  mkdir -p "$ROOT/tools/ghoul"
+  if [[ -n "$prefix" && -d "$prefix/lib/pkgconfig" ]]; then
+    export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  fi
+  cargo build --release --manifest-path "$ROOT/src-tauri/crates/ghoul-gst/Cargo.toml" || return 1
+  for cand in \
+    "$ROOT/src-tauri/target/release/ghoul-gst" \
+    "${CARGO_TARGET_DIR:-}/release/ghoul-gst"
+  do
+    if [[ -n "$cand" && -x "$cand" ]]; then
+      cp -f "$cand" "$ROOT/tools/ghoul/ghoul-gst"
+      chmod +x "$ROOT/tools/ghoul/ghoul-gst"
+      return 0
+    fi
+  done
+  return 1
+}
+
 node_major() {
   if ! have_cmd node; then
     echo 0
@@ -999,23 +1213,57 @@ install_node_unix() {
   fi
 }
 
+msrv() {
+  sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' "$ROOT/src-tauri/Cargo.toml" | head -n 1
+}
+
+rustc_version() {
+  rustc -vV 2>/dev/null | sed -n 's/^release: \([0-9.]*\).*/\1/p' | head -n 1
+}
+
+rustc_meets_msrv() {
+  local have need
+  have="$(rustc_version)"
+  need="$(msrv)"
+  [[ -n "$have" && -n "$need" ]] || return 1
+  python3 - "$have" "$need" <<'PY'
+import sys
+def parse(s):
+    parts = []
+    for x in s.split("."):
+        try:
+            parts.append(int(x))
+        except ValueError:
+            break
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+sys.exit(0 if parse(sys.argv[1]) >= parse(sys.argv[2]) else 1)
+PY
+}
+
 install_rust_unix() {
   cargo_env
-  if have_cmd cargo; then
+  if have_cmd cargo && have_cmd rustc && rustc_meets_msrv; then
     return 0
   fi
-  step "Rust" "missing" "need cargo" "fail"
-  if [[ "$PKG" == brew ]] && prompt_yes "Install Rust with Homebrew?"; then
+  if have_cmd rustc && ! rustc_meets_msrv; then
+    step "Rust" "too old" "$(rustc --version 2>/dev/null || true); need $(msrv)+" "fail"
+  else
+    step "Rust" "missing" "need cargo / rustc $(msrv)+" "fail"
+  fi
+  if [[ "$PKG" == brew ]] && prompt_yes "Install Rust $(msrv)+ with Homebrew?"; then
     run_pkg_install brew rust || true
     remember_tool rust brew
     cargo_env
   fi
-  if ! have_cmd cargo && prompt_yes "Install Rust with rustup (https://rustup.rs, no sudo)?"; then
+  if ! { have_cmd cargo && have_cmd rustc && rustc_meets_msrv; } \
+      && prompt_yes "Install Rust $(msrv)+ with rustup (https://rustup.rs, no sudo)?"; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     remember_tool rust rustup
     cargo_env
   fi
-  if ! have_cmd cargo; then
+  if ! { have_cmd cargo && have_cmd rustc && rustc_meets_msrv; }; then
     offer_pkg "Rust (cargo)" rust "rustc cargo" "rust cargo" "rust" "" || true
     cargo_env
   fi
@@ -1120,30 +1368,100 @@ install_build_libs_linux() {
   fi
 }
 
+# .cargo/config.toml may pin a Windows drive (S:\...). Cargo treats that as a
+# relative path on Linux/macOS, so metadata and the built binary disappear.
+# Prefer CARGO_TARGET_DIR when it is a native path; otherwise use a Unix dir.
+cargo_target_usable() {
+  python3 - "$1" <<'PY'
+import os, re, sys
+p = sys.argv[1]
+if not p:
+    raise SystemExit(1)
+if os.name == "nt":
+    raise SystemExit(0)
+if "\\" in p or re.search(r"(^|/)[A-Za-z]:", p):
+    raise SystemExit(1)
+raise SystemExit(0 if p.startswith("/") else 1)
+PY
+}
+
 cargo_target_dir() {
+  python3 - "$ROOT" <<'PY'
+import json, os, re, subprocess, sys
+root = sys.argv[1]
+fallback = os.path.join(root, "src-tauri", "target")
+
+def usable(p):
+    if not p:
+        return False
+    if os.name == "nt":
+        return True
+    if "\\" in p or re.search(r"(^|/)[A-Za-z]:", p):
+        return False
+    return p.startswith("/")
+
+env = os.environ.get("CARGO_TARGET_DIR") or ""
+if usable(env):
+    print(env)
+    raise SystemExit(0)
+
+td = ""
+raw = os.environ.get("CARGO_METADATA_JSON")
+if raw:
+    try:
+        td = json.loads(raw).get("target_directory") or ""
+    except Exception:
+        td = ""
+else:
+    manifest = os.path.join(root, "src-tauri", "Cargo.toml")
+    try:
+        out = subprocess.check_output(
+            [
+                "cargo", "metadata",
+                "--format-version", "1",
+                "--no-deps",
+                "--offline",
+                "--manifest-path", manifest,
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        td = json.loads(out).get("target_directory") or ""
+    except Exception:
+        td = ""
+
+print(td if usable(td) else fallback)
+PY
+}
+
+apply_cargo_target_dir() {
   local td
-  td="$(cargo metadata --format-version 1 --no-deps --offline --manifest-path src-tauri/Cargo.toml 2>/dev/null \
-    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | head -n 1)"
-  if [[ -n "$td" ]]; then
-    printf '%s\n' "$td"
-    return 0
+  td="$(cargo_target_dir)"
+  if [[ -n "$td" ]] && cargo_target_usable "$td"; then
+    export CARGO_TARGET_DIR="$td"
   fi
-  if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
-    printf '%s\n' "$CARGO_TARGET_DIR"
-    return 0
-  fi
-  printf '%s\n' "$ROOT/src-tauri/target"
+}
+
+host_triple() {
+  rustc -vV 2>/dev/null | sed -n 's/^host: //p' | head -n 1
 }
 
 find_cargo_release_bin() {
   local leaf="epg-monster-studio"
-  local td
+  local td host
   td="$(cargo_target_dir)"
+  host="$(host_triple || true)"
   local candidates=(
     "$td/release/$leaf"
     "$ROOT/src-tauri/target/release/$leaf"
     "$ROOT/target/release/$leaf"
   )
+  if [[ -n "$host" ]]; then
+    candidates+=(
+      "$td/$host/release/$leaf"
+      "$ROOT/src-tauri/target/$host/release/$leaf"
+    )
+  fi
   local p
   for p in "${candidates[@]}"; do
     if [[ -f "$p" ]]; then
@@ -1152,6 +1470,40 @@ find_cargo_release_bin() {
     fi
   done
   return 1
+}
+
+cargo_artifact_exe() {
+  python3 - "$1" <<'PY'
+import json, sys
+path = sys.argv[1]
+exe = ""
+try:
+    fh = open(path, encoding="utf-8", errors="replace")
+except OSError:
+    raise SystemExit(0)
+with fh:
+    for line in fh:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            msg = json.loads(line)
+        except Exception:
+            continue
+        if msg.get("reason") != "compiler-artifact":
+            continue
+        target = msg.get("target") or {}
+        if target.get("name") != "epg-monster-studio":
+            continue
+        kind = target.get("kind") or []
+        if "bin" not in kind:
+            continue
+        got = msg.get("executable") or ""
+        if got:
+            exe = got
+if exe:
+    print(exe)
+PY
 }
 
 quiet() {
@@ -1197,19 +1549,18 @@ build_launchable() {
     if [[ "$pct" -gt 99 && "$CARGO_DONE" -eq 0 ]]; then pct=99; fi
     set_row "cargo" "($n/$total  ${pct}%)" "$verb  $name" "wait"
   }
-  local line crate fresh cargo_log cargo_rc=0
+  cargo_env
+  local line crate fresh cargo_rc=1 cargo_log built
   cargo_log="$(mktemp)"
-  set +e
-  cargo build -p epg-monster-studio --message-format=json --release --features custom-protocol --manifest-path src-tauri/Cargo.toml >"$cargo_log" 2>&1
-  cargo_rc=$?
-  set -e
-  log_line ""
-  log_line ">> cargo build -p epg-monster-studio --release"
-  if [[ -n "$ACTION_LOG" ]]; then
-    cat "$cargo_log" >>"$ACTION_LOG" || true
-  fi
-  log_line "exit: $cargo_rc"
   while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "STUDIO_CARGO_EXIT:"* ]]; then
+      cargo_rc="${line#STUDIO_CARGO_EXIT:}"
+      continue
+    fi
+    printf '%s\n' "$line" >>"$cargo_log"
+    if [[ -n "$ACTION_LOG" ]]; then
+      printf '%s\n' "$line" >>"$ACTION_LOG"
+    fi
     if [[ "$line" == \{* ]]; then
       crate=""
       crate="$(printf '%s\n' "$line" | sed -n 's/.*#\([^@"]*\)@\([^"]*\)".*/\1 v\2/p' | head -n 1)"
@@ -1226,28 +1577,101 @@ build_launchable() {
     elif [[ "$line" =~ Checking[[:space:]]+([^[:space:]]+)[[:space:]]+(v[^[:space:]]+) ]]; then
       cargo_add_crate "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}" 1
     fi
-  done < "$cargo_log"
-  rm -f "$cargo_log"
-  if [[ "$cargo_rc" -ne 0 ]]; then
-    set_row "cargo" "failed" "exit $cargo_rc" "fail"
-    echo "cargo build failed (exit $cargo_rc). See ${ACTION_LOG:-./install.log}." >&2
-    exit "$cargo_rc"
-  fi
+  done < <(
+    cargo build -p epg-monster-studio --message-format=json --release --features custom-protocol --manifest-path src-tauri/Cargo.toml 2>&1
+    echo "STUDIO_CARGO_EXIT:$?"
+  )
   CARGO_DONE=1
   n=$(( ${#COMPILE_CRATES[@]} + ${#CHECK_CRATES[@]} ))
+  if [[ "$cargo_rc" -ne 0 ]]; then
+    set_row "cargo" "failed" "exit $cargo_rc" "fail"
+    echo "cargo build failed (exit $cargo_rc). CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-unset}" >&2
+    tail -n 40 "$cargo_log" >&2 || true
+    rm -f "$cargo_log"
+    exit "$cargo_rc"
+  fi
   set_row "cargo" "($n/$n  100%)" "done" "ok"
-  local built
-  built="$(find_cargo_release_bin)" || {
-    echo "cargo build finished but epg-monster-studio was not found in the target dir." >&2
+  built="$(cargo_artifact_exe "$cargo_log")"
+  rm -f "$cargo_log"
+  if [[ -z "$built" || ! -f "$built" ]]; then
+    built="$(find_cargo_release_bin)" || true
+  fi
+  if [[ -z "$built" || ! -f "$built" ]]; then
+    echo "cargo build finished but epg-monster-studio was not found in ${CARGO_TARGET_DIR:-$(cargo_target_dir)}." >&2
     exit 1
-  }
+  fi
   set_row "launchable" "(1/2  50%)" "copying exe" "wait"
   cp -f "$built" "$LAUNCHABLE"
   chmod +x "$LAUNCHABLE"
   set_row "launchable" "(2/2  100%)" "ready" "ok"
 }
 
+build_studio_server() {
+  cargo_env
+  phase "build web UI (dist/)"
+  STUDIO_WEB=1 npm run build
+  step "UI build" "ok" "dist/ (web)" "ok"
+  phase "cargo studio-server"
+  cargo build -p studio-server --release --manifest-path src-tauri/Cargo.toml
+  local built=""
+  if [[ -x "$ROOT/src-tauri/target/release/studio-server" ]]; then
+    built="$ROOT/src-tauri/target/release/studio-server"
+  elif [[ -n "${CARGO_TARGET_DIR:-}" && -x "$CARGO_TARGET_DIR/release/studio-server" ]]; then
+    built="$CARGO_TARGET_DIR/release/studio-server"
+  fi
+  if [[ -z "$built" ]]; then
+    echo "studio-server binary not found in cargo target" >&2
+    exit 1
+  fi
+  cp -f "$built" "$SERVER_BIN"
+  chmod +x "$SERVER_BIN"
+  step "cargo" "ok" "$SERVER_BIN" "ok"
+}
+
+install_studio_server() {
+  banner "install"
+  phase "toolchain (server — no desktop shell)"
+  cargo_env
+  PKG="$(detect_pkg)"
+  if [[ "$(uname -s)" == Darwin ]]; then
+    if ! have_cmd brew; then ensure_brew || true; else brew_env; fi
+    PKG="$(detect_pkg)"
+  fi
+  install_node_unix
+  if ! have_cmd cargo && ! have_cmd rustc; then
+    install_rust_unix
+  fi
+  step "Rust" "ok" "$(rustc --version 2>/dev/null || cargo --version 2>/dev/null || true)" "ok"
+  if ! have_ffmpeg; then
+    install_ffmpeg_unix
+    if ! have_ffmpeg; then
+      echo "Need ffmpeg and ffprobe on PATH." >&2
+      exit 1
+    fi
+  fi
+  step "ffmpeg" "ok" "ok" "ok"
+  if [[ ! -d node_modules ]]; then
+    quiet npm install
+  fi
+  mkdir -p "$ROOT/data"
+  step "data" "ok" "$ROOT/data" "ok"
+  build_studio_server
+  set_install_flavor server
+  remove_other_flavor_launchable server
+  UI_NOTE="server install complete!
+
+-> ./studio.sh --makepass   then  ./studio.sh --start
+   web UI: http://127.0.0.1:1420  (not http://0.0.0.0:1420)
+   ./studio.sh --makekey  then Connect from a desktop
+log: ./install.log"
+  paint
+}
+
 install_studio() {
+  if [[ "$INSTALL_FLAVOR" == server ]]; then
+    install_studio_server
+    return
+  fi
   banner "install"
   phase "toolchain"
   cargo_env
@@ -1279,7 +1703,11 @@ install_studio() {
     echo "Need Rust (cargo) on PATH. https://rustup.rs/" >&2
     exit 1
   fi
-  step "Rust" "ok" "$(cargo --version 2>/dev/null || true)" "ok"
+  if ! rustc_meets_msrv; then
+    echo "Need rustc $(msrv)+ (have $(rustc_version || echo none)). Install rustup and re-run --install." >&2
+    exit 1
+  fi
+  step "Rust" "ok" "$(rustc --version 2>/dev/null || cargo --version 2>/dev/null || true)" "ok"
 
   phase "media tools"
   if ! have_ffmpeg; then
@@ -1318,6 +1746,49 @@ install_studio() {
     fi
   fi
 
+  local libmpv gst sidecar
+  if libmpv="$(libmpv_path)"; then
+    step "libmpv" "found" "$libmpv" "ok"
+  else
+    step "libmpv" "not installed" "G-houl embed engine" "warn"
+    if offer_pkg "libmpv (G-houl embed)" libmpv "libmpv-dev" "mpv-libs-devel" "mpv" "mpv"; then
+      libmpv="$(libmpv_path || true)"
+    fi
+    if [[ -n "${libmpv:-}" ]]; then step "libmpv" "ok" "$libmpv" "ok"
+    else step "libmpv" "skipped" "G-houl libmpv engine disabled" "warn"
+    fi
+  fi
+
+  if gst="$(gst_root)"; then
+    step "GStreamer" "found" "$gst" "ok"
+  else
+    step "GStreamer" "not installed" "G-houl default engine" "warn"
+    if offer_pkg "GStreamer (G-houl)" gstreamer \
+      "gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev" \
+      "gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-devel gstreamer1-plugins-base-devel" \
+      "gstreamer gst-plugins-base gst-plugins-good gst-libav" \
+      "gstreamer"; then
+      gst="$(gst_root || true)"
+    fi
+    if [[ -n "${gst:-}" ]]; then step "GStreamer" "ok" "$gst" "ok"
+    else step "GStreamer" "skipped" "IPTV Player embed off; Play still uses mpv/VLC" "warn"
+    fi
+  fi
+
+  if sidecar="$(ghoul_gst_path)"; then
+    step "ghoul-gst" "found" "$sidecar" "ok"
+  elif [[ -n "${gst:-}" ]]; then
+    step "ghoul-gst" "building" "cargo build ghoul-gst" "wait"
+    if build_ghoul_gst "$gst"; then
+      sidecar="$(ghoul_gst_path || true)"
+    fi
+    if [[ -n "${sidecar:-}" ]]; then step "ghoul-gst" "ok" "$sidecar" "ok"
+    else step "ghoul-gst" "skipped" "build failed; see ./install.log" "warn"
+    fi
+  else
+    step "ghoul-gst" "skipped" "needs GStreamer" "warn"
+  fi
+
   install_build_libs_linux
 
   phase "workspace"
@@ -1331,6 +1802,8 @@ install_studio() {
   mkdir -p "$ROOT/data"
   step "data" "ok" "$ROOT/data" "ok"
   build_launchable
+  set_install_flavor desktop
+  remove_other_flavor_launchable desktop
   UI_NOTE="install complete!
 
 -> ./studio.sh --shortcuts to install desktop and menu shortcuts
@@ -1349,6 +1822,24 @@ Name=epg.monster studio
 Comment=epg.monster studio
 Exec=env EPG_MONSTER_HOME="$ROOT" "$LAUNCHABLE"
 Path=$ROOT
+Icon=$ICON_PNG
+Terminal=false
+Categories=AudioVideo;Utility;
+StartupNotify=true
+EOF
+  chmod +x "$dest"
+  step "shortcut" "wrote" "$dest" "ok"
+}
+
+write_desktop_file_web() {
+  local dest="$1"
+  mkdir -p "$(dirname "$dest")"
+  cat > "$dest" <<EOF
+[Desktop Entry]
+Type=Application
+Name=epg.monster studio
+Comment=epg.monster studio (web)
+Exec=xdg-open http://127.0.0.1:1420
 Icon=$ICON_PNG
 Terminal=false
 Categories=AudioVideo;Utility;
@@ -1379,6 +1870,32 @@ linux_desk() {
 
 install_shortcuts() {
   banner "shortcuts"
+  if [[ "$(get_install_flavor)" == server ]]; then
+    if [[ ! -x "$SERVER_BIN" ]]; then
+      echo "Need $SERVER_BIN. Run ./studio.sh --install server first." >&2
+      exit 1
+    fi
+    case "$(uname -s)" in
+      Linux)
+        write_desktop_file_web "$HOME/.local/share/applications/epg.monster-studio.desktop"
+        local desk
+        desk="$(linux_desk)"
+        if [[ -d "$desk" ]]; then
+          write_desktop_file_web "$desk/epg.monster studio.desktop"
+        fi
+        ;;
+      Darwin)
+        mkdir -p "$HOME/Applications"
+        printf '#!/bin/bash\nopen http://127.0.0.1:1420\n' > "$HOME/Applications/epg.monster studio.command"
+        chmod +x "$HOME/Applications/epg.monster studio.command"
+        step "shortcut" "wrote" "$HOME/Applications/epg.monster studio.command" "ok"
+        ;;
+    esac
+    echo
+    printf '%s  shortcuts open http://127.0.0.1:1420  (start the server with --start)%s\n' "$C_GRN" "$C_RST"
+    echo
+    return 0
+  fi
   if [[ ! -x "$LAUNCHABLE" ]]; then
     step "launchable" "missing" "running --install first" "warn"
     install_studio
@@ -1438,8 +1955,8 @@ uninstall_studio() {
     PKG="$(detect_pkg)"
   fi
   echo
-  printf '%s  What do you want to uninstall?  ./data is never deleted.%s\n' "$C_YEL" "$C_RST"
-  if prompt_yes "Remove studio binary and Desktop / applications shortcuts?"; then
+  printf '%s  What do you want to uninstall?  ./data is never deleted (databases, web-auth.json, api-keys.json).%s\n' "$C_YEL" "$C_RST"
+  if prompt_yes "Remove studio binaries (desktop + studio-server) and Desktop / applications shortcuts?"; then
     phase "stop"
     stop_studio
     phase "shortcuts"
@@ -1455,8 +1972,10 @@ uninstall_studio() {
     esac
     phase "launchable"
     remove_if_exists "$LAUNCHABLE"
+    remove_if_exists "$SERVER_BIN"
     remove_if_exists "$PIDFILE"
-    step "app" "removed" "binary + shortcuts" "ok"
+    set_install_flavor ""
+    step "app" "removed" "binaries + shortcuts" "ok"
   else
     step "app" "kept" "" "skip"
   fi
@@ -1497,18 +2016,128 @@ uninstall_studio() {
     step "VLC" "kept" "" "skip"
   fi
 
+  if libmpv_path >/dev/null && prompt_no "Uninstall libmpv too?"; then
+    uninstall_pkg libmpv "libmpv-dev" "mpv-libs-devel" "mpv" "mpv" || true
+    rm -f "$ROOT/tools/mpv/libmpv.so.2" "$ROOT/tools/mpv/libmpv.dylib"
+    step "libmpv" "removed" "" "ok"
+  else
+    step "libmpv" "kept" "" "skip"
+  fi
+
+  if ghoul_gst_path >/dev/null && prompt_no "Remove G-houl GStreamer sidecar too?"; then
+    rm -f "$ROOT/tools/ghoul/ghoul-gst"
+    step "ghoul-gst" "removed" "" "ok"
+  else
+    step "ghoul-gst" "kept" "" "skip"
+  fi
+
+  if gst_root >/dev/null && prompt_no "Uninstall GStreamer too?"; then
+    uninstall_pkg gstreamer \
+      "gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev" \
+      "gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-devel gstreamer1-plugins-base-devel" \
+      "gstreamer gst-plugins-base gst-plugins-good gst-libav" \
+      "gstreamer" || true
+    step "GStreamer" "removed" "" "ok"
+  else
+    step "GStreamer" "kept" "" "skip"
+  fi
+
   UI_NOTE="uninstall complete
 
-./data was not deleted.
+./data was not deleted (databases, web-auth.json, api-keys.json, logs).
 log: ./uninstall.log"
   paint
 }
 
-start_studio() {
-  if running; then
-    step "app" "already running" "pid $(tr -d '[:space:]' < "$PIDFILE")" "ok"
+make_key() {
+  assert_server_feature "--makekey"
+  banner "makekey"
+  export EPG_MONSTER_HOME="$ROOT"
+  if [[ ! -x "$SERVER_BIN" ]]; then
+    step "server" "missing" "building studio-server" "warn"
+    build_studio_server
+  fi
+  if [[ ! -x "$SERVER_BIN" ]]; then
+    echo "Need $SERVER_BIN. Run ./studio.sh --install server first." >&2
+    exit 1
+  fi
+  if [[ -n "${MAKEKEY_NAME:-}" ]]; then
+    "$SERVER_BIN" --makekey "$MAKEKEY_NAME"
+  else
+    "$SERVER_BIN" --makekey
+  fi
+  UI_NOTE="Paste the key in desktop Settings → This computer → Connect. It is not shown again."
+  paint
+}
+
+make_pass() {
+  assert_server_feature "--makepass"
+  banner "makepass"
+  export EPG_MONSTER_HOME="$ROOT"
+  if [[ ! -x "$SERVER_BIN" ]]; then
+    step "server" "missing" "building studio-server" "warn"
+    build_studio_server
+  fi
+  if [[ ! -x "$SERVER_BIN" ]]; then
+    echo "Need $SERVER_BIN. Run ./studio.sh --install server first." >&2
+    exit 1
+  fi
+  if [[ -n "${MAKEPASS_VALUE:-}" ]]; then
+    "$SERVER_BIN" --makepass "$MAKEPASS_VALUE"
+  else
+    "$SERVER_BIN" --makepass
+  fi
+  UI_NOTE="Sign in as admin on the web UI. You must set a new password on first login."
+  paint
+}
+
+start_studio_server() {
+  if [[ ! -x "$SERVER_BIN" ]]; then
+    step "server" "missing" "building studio-server" "warn"
+    build_studio_server
+  fi
+  export EPG_MONSTER_HOME="$ROOT"
+  export STUDIO_BIND="0.0.0.0:1420"
+  if [[ "${START_HEADLESS:-0}" -eq 1 ]]; then
+    unset STUDIO_UI_DIR
+    export STUDIO_HEADLESS=1
+    "$SERVER_BIN" --headless &
+    echo $! > "$PIDFILE"
+    if [[ -z "$(get_recorded_flavor)" ]]; then set_install_flavor server; fi
+    step "app" "started" "pid $(tr -d '[:space:]' < "$PIDFILE")  headless API :1420" "ok"
+    echo "  epg.monster studio API (headless) — Connect from desktop Settings"
+    print_server_urls
     return 0
   fi
+  if [[ ! -f "$ROOT/dist/index.html" ]]; then
+    STUDIO_WEB=1 npm run build
+  fi
+  unset STUDIO_HEADLESS
+  export STUDIO_UI_DIR="$ROOT/dist"
+  "$SERVER_BIN" &
+  echo $! > "$PIDFILE"
+  if [[ -z "$(get_recorded_flavor)" ]]; then set_install_flavor server; fi
+  step "app" "started" "pid $(tr -d '[:space:]' < "$PIDFILE")  http://127.0.0.1:1420" "ok"
+  echo "  epg.monster studio (web)"
+  print_server_urls
+}
+
+start_studio() {
+  if [[ "${START_HEADLESS:-0}" -eq 1 ]]; then
+    assert_server_feature "--start headless"
+  fi
+  local want="desktop"
+  if [[ "$(get_install_flavor)" == server ]]; then
+    if [[ "${START_HEADLESS:-0}" -eq 1 ]]; then want=headless; else want=server; fi
+  fi
+  if ensure_start_mode "$want"; then
+    return 0
+  fi
+  if [[ "$(get_install_flavor)" == server ]]; then
+    start_studio_server
+    return 0
+  fi
+  cargo_env
   export EPG_MONSTER_HOME="$ROOT"
   if [[ -x "$LAUNCHABLE" ]]; then
     phase "build UI (dist/)"
@@ -1532,42 +2161,77 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
 
-want_install=0
-want_shortcuts=0
-want_uninstall=0
-want_start=0
-want_stop=0
-want_help=0
-unknown=()
-if [[ $# -eq 0 ]]; then
-  want_install=1
-  want_start=1
-else
-  for a in "$@"; do
-    case "$a" in
-      --install | install ) want_install=1 ;;
-      --shortcuts | shortcuts ) want_shortcuts=1 ;;
-      --uninstall | uninstall ) want_uninstall=1 ;;
-      --start | start ) want_start=1 ;;
-      --stop | stop ) want_stop=1 ;;
-      --restart | restart ) want_stop=1; want_start=1 ;;
-      --help | -h | help ) want_help=1 ;;
-      * ) unknown+=("$a") ;;
-    esac
-  done
-fi
-if [[ ${#unknown[@]} -gt 0 ]]; then
-  echo "unknown: ${unknown[*]}" >&2
-  usage >&2
-  exit 1
-fi
-if [[ "$want_help" -eq 1 ]]; then
-  usage
-  exit 0
-fi
-trap 'restore_tty' EXIT
-if [[ "$want_stop" -eq 1 ]]; then start_action_log stop; stop_studio; fi
-if [[ "$want_uninstall" -eq 1 ]]; then start_action_log uninstall; uninstall_studio; fi
-if [[ "$want_install" -eq 1 ]]; then start_action_log install; install_studio; fi
-if [[ "$want_shortcuts" -eq 1 ]]; then start_action_log shortcuts; install_shortcuts; fi
-if [[ "$want_start" -eq 1 ]]; then start_action_log start; start_studio; fi
+studio_main() {
+  local want_install=0 want_shortcuts=0 want_uninstall=0 want_start=0 want_stop=0 want_makepass=0 want_makekey=0 want_help=0
+  START_HEADLESS=0
+  local unknown=() a
+  if [[ $# -eq 0 ]]; then
+    want_install=1
+    want_start=1
+  else
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --install | install ) want_install=1 ;;
+        server | desktop ) INSTALL_FLAVOR="$1" ;;
+        --shortcuts | shortcuts ) want_shortcuts=1 ;;
+        --uninstall | uninstall ) want_uninstall=1 ;;
+        --start | start )
+          want_start=1
+          if [[ $# -gt 1 && ( "$2" == "headless" || "$2" == "--headless" ) ]]; then
+            START_HEADLESS=1
+            shift
+          fi
+          ;;
+        --headless | headless )
+          START_HEADLESS=1
+          want_start=1
+          ;;
+        --makepass | makepass )
+          want_makepass=1
+          if [[ $# -gt 1 && "$2" != --* ]]; then
+            MAKEPASS_VALUE="$2"
+            shift
+          fi
+          ;;
+        --makekey | makekey )
+          want_makekey=1
+          if [[ $# -gt 1 && "$2" != --* ]]; then
+            MAKEKEY_NAME="$2"
+            shift
+          fi
+          ;;
+        --stop | stop ) want_stop=1 ;;
+        --restart | restart )
+          want_stop=1
+          want_start=1
+          if [[ $# -gt 1 && ( "$2" == "headless" || "$2" == "--headless" ) ]]; then
+            START_HEADLESS=1
+            shift
+          fi
+          ;;
+        --help | -h | help ) want_help=1 ;;
+        * ) unknown+=("$1") ;;
+      esac
+      shift
+    done
+  fi
+  if [[ ${#unknown[@]} -gt 0 ]]; then
+    echo "unknown: ${unknown[*]}" >&2
+    usage >&2
+    exit 1
+  fi
+  if [[ "$want_help" -eq 1 ]]; then
+    usage
+    exit 0
+  fi
+  trap 'restore_tty' EXIT
+  if [[ "$want_stop" -eq 1 ]]; then start_action_log stop; stop_studio; fi
+  if [[ "$want_uninstall" -eq 1 ]]; then start_action_log uninstall; uninstall_studio; fi
+  if [[ "$want_install" -eq 1 ]]; then start_action_log install; install_studio; fi
+  if [[ "$want_shortcuts" -eq 1 ]]; then start_action_log shortcuts; install_shortcuts; fi
+  if [[ "$want_makepass" -eq 1 ]]; then start_action_log makepass; make_pass; fi
+  if [[ "$want_makekey" -eq 1 ]]; then start_action_log makekey; make_key; fi
+  if [[ "$want_start" -eq 1 ]]; then start_action_log start; start_studio; fi
+}
+
+studio_main "$@"

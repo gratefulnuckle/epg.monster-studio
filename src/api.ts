@@ -72,4 +72,6 @@ export const api = {
     invoke<string>("add_backup_from_source", { managedId, entryId }),
   listManaged: (group?: string) =>
     invoke<{ id: string; name: string; groupTitle: string }[]>("list_managed", { group }),
+  addFromSource: (entryId: string) => invoke<{ id: string; name: string }>("add_from_source", { entryId }),
+  openSourceSearchWindow: (query: string) => invoke<void>("open_source_search_window", { query }),
 };

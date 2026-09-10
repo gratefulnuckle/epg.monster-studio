@@ -1,0 +1,17 @@
+[package]
+name = "ghoul-pane"
+version = "3.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "G-houl native video pane (child window over the webview)"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_LibraryLoader",
+] }

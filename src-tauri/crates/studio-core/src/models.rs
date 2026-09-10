@@ -69,6 +69,8 @@ pub struct ManagedChannel {
     pub sort_order: i32,
     pub tvg_shift_hours: f64,
     pub in_tuner: bool,
+    #[serde(default)]
+    pub hidden: bool,
     pub tuner_number: Option<i32>,
     pub variants: Vec<StreamVariant>,
     pub has_epg_match: bool,

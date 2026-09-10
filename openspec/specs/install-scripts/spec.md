@@ -2,26 +2,63 @@
 
 ## Purpose
 
-`studio.ps1` (Windows) and `studio.sh` (Linux / macOS) are the v2 launchers. They
+`studio.ps1` (Windows) and `studio.sh` (Linux / macOS) are the v3 launchers. They
 MUST install, record, and uninstall toolchain and media tools without guessing.
-This spec is the source of truth for those scripts. The Tauri app specs do not
-cover them; that gap is why uninstall missed Scoop `nodejs`, winget ffmpeg, and
-rustup.
+This spec is the source of truth for those scripts. Server HTTP behavior lives in
+`openspec/specs/server-host/`. Operator steps: `INSTALL.md`.
 
-Data (`./data`) is never deleted.
+Data (`./data`) is never deleted. `.studio-install.json` `flavor` is `desktop` or
+`server` and SHALL gate server-only flags.
 
 ## Requirements
 
 ### Requirement: Flags
 
-The launchers SHALL support `--install`, `--shortcuts`, `--uninstall`, `--start`,
-`--stop`, `--restart`, `--help`. No args means install then start.
+The launchers SHALL support `--install`, `--install desktop`, `--install server`,
+`--makepass`, `--makekey`, `--shortcuts`, `--uninstall`, `--start`,
+`--start headless`, `--stop`, `--restart`, `--help`.
+No args means install desktop then start. `--install` with no flavor means desktop.
 
 #### Scenario: Help lists flags
 - GIVEN the repo root
 - WHEN the operator runs `--help`
 - THEN those flags are listed
+- AND `--install desktop` and `--install server` are listed
 - AND the operator is told `./data` is never deleted
+
+#### Scenario: Server flavor skips the desktop shell
+- GIVEN the repo root
+- WHEN the operator runs `--install server`
+- THEN Node, Rust, and ffmpeg are offered
+- AND the desktop WebView / Tauri `.exe` is not built
+- AND `studio-server` is built
+- AND `.studio-install.json` `flavor` is `server`
+
+#### Scenario: Server start is the browser UI
+- GIVEN a server install
+- WHEN the operator runs `--start`
+- THEN `studio-server` binds `0.0.0.0:1420` and the UI is opened at `http://127.0.0.1:1420`
+- AND no desktop window is opened
+
+#### Scenario: Headless server is API only
+- GIVEN a server install
+- WHEN the operator runs `--start headless`
+- THEN `studio-server` binds `0.0.0.0:1420` without serving the web UI
+- AND a desktop API key is created if none exist and printed once
+- AND no desktop window is opened
+
+#### Scenario: Make a desktop API key
+- GIVEN a server install
+- WHEN the operator runs `--makekey`
+- THEN a key starting with `epgs_` is printed once
+- AND the hash is stored under `{data}/api-keys.json`
+
+#### Scenario: Desktop install rejects server-only flags
+- GIVEN a desktop install (`.studio-install.json` `flavor` is `desktop` or missing)
+- WHEN the operator runs `--makekey`
+- THEN the launcher exits without creating a key
+- AND the message is `Desktop version is installed. --makekey is not a feature.`
+- AND `--makepass` and `--start headless` fail the same way with their flag names
 
 ### Requirement: Per-OS package managers
 
@@ -60,7 +97,8 @@ resolved (installed **or** already present). Each tool record SHALL include:
 | `wingetId` | winget package id when known |
 | `ffprobe` | Absolute ffprobe path (ffmpeg record only) |
 
-Top-level SHALL include `written` (local timestamp) and `folder` (repo path).
+Top-level SHALL include `written` (local timestamp), `folder` (repo path), and
+`flavor` (`desktop` | `server`). Missing `flavor` SHALL be treated as `desktop`.
 
 Legacy files that store `"node": "scoop"` (string) MUST still parse as `{ how: "scoop" }`.
 
@@ -79,7 +117,10 @@ Legacy files that store `"node": "scoop"` (string) MUST still parse as `{ how: "
 ### Requirement: Uninstall uses the JSON first
 
 `--uninstall` SHALL prompt **[y/N]** for Node, Rust, ffmpeg, mpv, and VLC when
-the JSON has a record **or** the real binary is still present.
+the JSON has a record **or** the real binary is still present. Confirming
+remove-app SHALL delete `epg-monster-studio` **and** `studio-server` launchables
+when present, plus shortcuts and the pid file. `./data` (including
+`web-auth.json` and `api-keys.json`) is never deleted.
 
 Uninstall SHALL use recorded `how` / `scoopName` / `wingetId` / `path` in that
 order, then fall back to the other manager. It MUST NOT treat “Scoop package
@@ -102,8 +143,9 @@ then Scoop `rustup`. Errors go to the action log; the row is `failed` if
 ### Requirement: Action logs
 
 Each flag SHALL write `{repo}/<flag>.log` (`install.log`, `uninstall.log`,
-`start.log`, `stop.log`, `shortcuts.log`). Package-manager stdout/stderr MUST
-be appended. Native `info:` / rustup sync MUST NOT abort the script.
+`start.log`, `stop.log`, `shortcuts.log`, `makepass.log`, `makekey.log`).
+Package-manager stdout/stderr MUST be appended. Native `info:` / rustup sync
+MUST NOT abort the script.
 
 #### Scenario: cargo stderr
 - GIVEN `$ErrorActionPreference` is Stop

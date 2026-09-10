@@ -755,6 +755,7 @@ mod tests {
             sort_order: 0,
             tvg_shift_hours: 0.0,
             in_tuner: false,
+            hidden: false,
             tuner_number: None,
             variants: Vec::new(),
             has_epg_match: false,

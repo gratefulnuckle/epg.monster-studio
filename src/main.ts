@@ -12,6 +12,11 @@ startHeartbeat();
 const appEl = document.querySelector<HTMLDivElement>("#app");
 if (!appEl) throw new Error("#app missing");
 const app = appEl;
+if (!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
+  document.documentElement.classList.add("studio-web");
+  const { gateWebLogin } = await import("./web/login");
+  await gateWebLogin(app);
+}
 
 function isCatalogView(): boolean {
   try {

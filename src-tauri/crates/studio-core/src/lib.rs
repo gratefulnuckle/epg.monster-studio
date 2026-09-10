@@ -20,6 +20,7 @@ pub mod store;
 pub mod tools;
 pub mod bootstrap;
 pub mod xtream;
+pub mod update;
 
 pub use info::{
     display_version, github_open_studio_issues, latest_github_release, latest_github_tag,
@@ -27,7 +28,7 @@ pub use info::{
     USER_AGENT, VERSION,
 };
 pub use models::{ChannelEntry, EpgSuggestion, ManagedChannel, NowPlaying, StreamVariant};
-pub use export::{export_all, export_visible_only};
+pub use export::{export_all, export_ghoul_snapshot, export_visible_only, ghoul_mount_gate};
 pub use parser::parse_m3u;
 pub use settings::AppSettings;
 pub use store::SqliteStore;

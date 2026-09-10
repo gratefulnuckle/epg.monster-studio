@@ -15,6 +15,7 @@ Thumbs.db
 logs/
 _tooling-check/
 .studio-dev.pid
+.studio.pid
 .studio-install.json
 *.log
 *.m3u

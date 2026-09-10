@@ -242,6 +242,15 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    /// IPTV Player uses the member XMLTV feed only when that tuner option is on
+    /// and a feed URL + access key are present. Otherwise it slices the fetched
+    /// epg.monster catalog already in SQLite.
+    pub fn player_uses_member_epg(&self) -> bool {
+        self.tuner_use_member_epg
+            && !self.member_access_key.trim().is_empty()
+            && self.advertised_member_epg_url().is_some()
+    }
+
     pub fn advertised_member_epg_url(&self) -> Option<String> {
         let gz = self.member_feed_url_gz.trim();
         if !gz.is_empty() {
@@ -343,6 +352,18 @@ mod tests {
         p.port = 5004;
         p.ensure_identity();
         assert_eq!(p.port, 8080);
+    }
+
+    #[test]
+    fn player_epg_uses_catalog_unless_member_feed_is_selected() {
+        let mut s = AppSettings::default();
+        assert!(!s.player_uses_member_epg());
+        s.tuner_use_member_epg = true;
+        s.member_access_key = "k".into();
+        s.member_feed_url_gz = "https://my.epg.monster/example.xml.gz".into();
+        assert!(s.player_uses_member_epg());
+        s.member_access_key.clear();
+        assert!(!s.player_uses_member_epg());
     }
 
     #[test]

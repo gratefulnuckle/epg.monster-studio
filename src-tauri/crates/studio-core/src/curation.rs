@@ -162,6 +162,7 @@ mod tests {
             sort_order: 0,
             tvg_shift_hours: 0.0,
             in_tuner: false,
+            hidden: false,
             tuner_number: None,
             variants: vec![],
             has_epg_match: false,

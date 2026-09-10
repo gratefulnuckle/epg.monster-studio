@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v2.*"
+      - "v3.*"
   workflow_dispatch:
 
 permissions:
@@ -56,9 +57,46 @@ jobs:
           releaseBody: |
             **epg.monster studio** ${{ github.ref_name }} (Tauri v2).
 
-            Windows/macOS testers: `studio.ps1` / `studio.sh` (dev). Linux: `.deb`, AppImage, or `./studio.sh`.
-            NSIS, Authenticode, and signed `.dmg` are v3.
-            Data lives in `{launch folder}/data` (the folder that contains the AppImage), not OS AppData.
+            Install: `studio.ps1` / `studio.sh` (INSTALL.md). No Windows NSIS, no signed macOS dmg.
+            Linux: `.deb`, AppImage, or `./studio.sh`.
+            Data lives in `{launch folder}/data`.
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  windows-portable:
+    if: github.ref_type == 'tag'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install frontend
+        run: npm ci
+      - name: Build desktop UI
+        run: npm run build
+      - name: Build desktop exe
+        run: cargo build --release --features custom-protocol --manifest-path src-tauri/Cargo.toml
+      - name: Build web UI
+        run: |
+          $env:STUDIO_WEB = "1"
+          npm run build
+      - name: Build studio-server
+        run: cargo build -p studio-server --release --manifest-path src-tauri/Cargo.toml
+      - name: Pack web dist
+        run: Compress-Archive -Path dist\* -DestinationPath studio-web-dist.zip
+      - name: Upload portable assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/epg-monster-studio.exe
+            src-tauri/target/release/studio-server.exe
+            studio-web-dist.zip
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

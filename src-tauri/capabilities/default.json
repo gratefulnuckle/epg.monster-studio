@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities",
-  "windows": ["main", "epg-catalog"],
+  "windows": ["main", "epg-catalog", "source-search"],
   "permissions": [
     "core:default",
     "core:window:allow-hide",

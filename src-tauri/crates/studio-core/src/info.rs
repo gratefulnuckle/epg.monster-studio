@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-pub const VERSION: &str = "v2.0.2";
+pub const VERSION: &str = "v3.0.0";
 pub const EDITION: &str = "2026";
-pub const USER_AGENT: &str = "epg.monster-studio/v2.0.2";
+pub const USER_AGENT: &str = "epg.monster-studio/v3.0.0";
 pub const DISPLAY_NAME: &str = "epg.monster studio";
 pub const PRODUCT_ID: &str = "epg.monster-studio";
 pub const GITHUB_REPO: &str = "gratefulnuckle/epg.monster-studio";
@@ -22,10 +22,18 @@ pub fn display_version() -> String {
 }
 
 #[derive(Debug, Clone)]
+pub struct GithubAsset {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct GithubRelease {
     pub tag: String,
     pub html_url: String,
     pub body: Option<String>,
+    pub assets: Vec<GithubAsset>,
 }
 
 fn github_status_message(status: u16) -> String {
@@ -36,7 +44,7 @@ fn github_status_message(status: u16) -> String {
     }
 }
 
-/// Latest GitHub release for this v2 repo. Does not log URLs or keys.
+/// Latest GitHub release. Does not log URLs or keys.
 pub fn latest_github_release() -> Result<GithubRelease, String> {
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
     let resp = ureq::get(&url)
@@ -66,10 +74,32 @@ pub fn latest_github_release() -> Result<GithubRelease, String> {
         .and_then(|t| t.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let assets = v
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|it| {
+                    let name = it.get("name")?.as_str()?.trim().to_string();
+                    let url = it
+                        .get("browser_download_url")?
+                        .as_str()?
+                        .trim()
+                        .to_string();
+                    if name.is_empty() || url.is_empty() {
+                        return None;
+                    }
+                    let size = it.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+                    Some(GithubAsset { name, url, size })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(GithubRelease {
         tag,
         html_url,
         body,
+        assets,
     })
 }
 

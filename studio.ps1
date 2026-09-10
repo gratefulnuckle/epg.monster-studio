@@ -1,10 +1,12 @@
-﻿# v2 portable launcher (Windows). Same flags as studio.sh.
-# Data and logs live next to the repo. NSIS / certs are v3.
+﻿# v3 portable launcher (Windows). Same flags as studio.sh.
+# Data and logs live next to the repo. This script is the installer (no NSIS).
 # Use $args (not param()) so --start/--stop are not parsed as named parameters.
 $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
 $PidFile = Join-Path $Root ".studio-dev.pid"
 $Launchable = Join-Path $Root "epg-monster-studio.exe"
+$ServerBin = Join-Path $Root "studio-server.exe"
+$script:InstallFlavor = "desktop"
 $IconIco = Join-Path $Root "src-tauri\icons\mascot.ico"
 $WebViewDll = Join-Path $Root "WebView2Loader.dll"
 $ToolStatePath = Join-Path $Root ".studio-install.json"
@@ -36,6 +38,8 @@ public static class NativeConsole {
 
 function Get-DesktopLnk { Join-Path ([Environment]::GetFolderPath("Desktop")) "epg.monster studio.lnk" }
 function Get-StartLnk { Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\epg.monster studio.lnk" }
+function Get-DesktopUrl { Join-Path ([Environment]::GetFolderPath("Desktop")) "epg.monster studio.url" }
+function Get-StartUrl { Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\epg.monster studio.url" }
 
 function Write-Rule {
     Write-Host ("  " + ("-" * 56)) -ForegroundColor DarkMagenta
@@ -450,16 +454,22 @@ function Show-Usage {
     Write-Banner "help"
     Write-Host @"
   .\studio.ps1                 install + start
-  .\studio.ps1 --install       Node, Rust, gcc, ffmpeg, mpv/VLC; build the .exe
-  .\studio.ps1 --shortcuts     Desktop + Start Menu
+  .\studio.ps1 --install              same as --install desktop
+  .\studio.ps1 --install desktop      Node, Rust, gcc, ffmpeg, mpv/VLC, G-houl; build the .exe
+  .\studio.ps1 --install server       Node, Rust, ffmpeg; build studio-server (browser UI, no desktop shell)
+  .\studio.ps1 --shortcuts     desktop: .exe icon · server: http://127.0.0.1:1420
   .\studio.ps1 --uninstall     stop, remove shortcuts + launchable; optional tools
-  .\studio.ps1 --start         build UI, run the launchable
+  .\studio.ps1 --start                desktop: run the .exe · server: serve the web UI on http://127.0.0.1:1420
+  .\studio.ps1 --start headless       server: API only (no web UI). Connect from desktop with an API key
+  .\studio.ps1 --makepass             server: temporary admin password for the web UI (must change at first login)
+  .\studio.ps1 --makekey              server: desktop API key (shown once). Paste it in desktop Settings → Connect
   .\studio.ps1 --stop          stop
   .\studio.ps1 --restart       stop then start
   .\studio.ps1 --help
 
   --install uses winget for Node and Rust; scoop then winget for ffmpeg / mpv / VLC
-  --uninstall prompts for studio plus Node, Rust, ffmpeg, mpv, VLC
+  --install also stages libmpv, a GStreamer prefix, and tools\ghoul\ghoul-gst.exe
+  --uninstall prompts for studio plus Node, Rust, ffmpeg, mpv, VLC, libmpv, GStreamer
   .\data is never deleted
   each action writes .\install.log / .\uninstall.log / .\start.log / ...
 "@ -ForegroundColor Gray
@@ -492,7 +502,7 @@ function Stop-Studio {
         }
         Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     }
-    $studioProcs = Get-Process -Name "epg-monster-studio" -ErrorAction SilentlyContinue
+    $studioProcs = Get-Process -Name "epg-monster-studio","studio-server" -ErrorAction SilentlyContinue
     foreach ($proc in $studioProcs) {
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
         $n += 1
@@ -567,6 +577,7 @@ function Read-InstallState {
     $state = @{
         written = ""
         folder = $Root
+        flavor = "desktop"
         tools = @{}
     }
     if (-not (Test-Path $ToolStatePath)) { return $state }
@@ -574,6 +585,7 @@ function Read-InstallState {
         $j = Get-Content $ToolStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($j.written) { $state.written = [string]$j.written }
         if ($j.folder) { $state.folder = [string]$j.folder }
+        if ($j.PSObject.Properties.Name -contains "flavor") { $state.flavor = [string]$j.flavor }
         $src = $j.tools
         if (-not $src) { $src = $j }
         foreach ($p in $src.PSObject.Properties) {
@@ -594,13 +606,116 @@ function Read-InstallState {
 }
 
 function Save-InstallState($state) {
-    if (-not $state.tools -or $state.tools.Count -eq 0) {
-        if (Test-Path $ToolStatePath) { Remove-Item -Force $ToolStatePath -ErrorAction SilentlyContinue }
-        return
-    }
     $state.written = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $state.folder = $Root
+    if ($null -eq $state.flavor) { $state.flavor = "desktop" }
     ConvertTo-Json -InputObject $state -Depth 6 | Set-Content -Path $ToolStatePath -Encoding UTF8
+}
+
+function Get-RecordedFlavor {
+    $s = Read-InstallState
+    $f = [string]$s.flavor
+    if ($f -eq "server" -or $f -eq "desktop") { return $f }
+    return ""
+}
+
+function Get-InstallFlavor {
+    $f = Get-RecordedFlavor
+    if ($f) { return $f }
+    $hasServer = Test-Path $ServerBin
+    $hasDesk = Test-Path $Launchable
+    if ($hasServer -and -not $hasDesk) { return "server" }
+    return "desktop"
+}
+
+function Assert-ServerFeature([string]$Flag) {
+    if ((Get-InstallFlavor) -eq "server") { return }
+    throw "Desktop version is installed. $Flag is not a feature."
+}
+
+function Set-InstallFlavor([string]$Flavor) {
+    $s = Read-InstallState
+    $s.flavor = $Flavor
+    Save-InstallState $s
+}
+
+function Remove-OtherFlavorLaunchable([string]$Keep) {
+    if ($Keep -eq "server") {
+        if (Test-Path $Launchable) {
+            Remove-Item -Force $Launchable -ErrorAction SilentlyContinue
+            Write-Step "desktop exe" "removed" "this folder is a server install" "ok"
+        }
+        if (Test-Path $WebViewDll) {
+            Remove-Item -Force $WebViewDll -ErrorAction SilentlyContinue
+        }
+    } else {
+        if (Test-Path $ServerBin) {
+            Remove-Item -Force $ServerBin -ErrorAction SilentlyContinue
+            Write-Step "studio-server" "removed" "this folder is a desktop install" "ok"
+        }
+    }
+}
+
+function Get-RunningStudioKind {
+    $srv = Get-Process -Name "studio-server" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($srv) {
+        try {
+            $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($srv.Id)" -ErrorAction SilentlyContinue).CommandLine
+            if ($cmd -and ($cmd -match "headless")) { return "headless" }
+        } catch { }
+        return "server"
+    }
+    if (Get-Process -Name "epg-monster-studio" -ErrorAction SilentlyContinue) { return "desktop" }
+    if (Test-Running) { return "unknown" }
+    return ""
+}
+
+function Ensure-StartMode([string]$Want) {
+    $have = Get-RunningStudioKind
+    if (-not $have) { return $false }
+    if ($have -eq $Want) {
+        Write-Step "app" "already running" $have "ok"
+        return $true
+    }
+    Write-Step "app" "restarting" "$have -> $Want" "warn"
+    Stop-Studio
+    $lock = Join-Path $Root "data\session.lock"
+    Remove-Item $lock -Force -ErrorAction SilentlyContinue
+    return $false
+}
+
+function Write-ServerListenHint {
+    Write-Host "  On this PC:  http://127.0.0.1:1420" -ForegroundColor Green
+    Write-Host "  Do not open http://0.0.0.0:1420 (bind address, not a URL)." -ForegroundColor DarkGray
+    $ips = @()
+    try {
+        $ips = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
+            Select-Object -ExpandProperty IPAddress -Unique)
+    } catch { }
+    if (-not $ips.Count) {
+        try {
+            $ips = @((Get-CimInstance Win32_NetworkAdapterConfiguration -ErrorAction SilentlyContinue |
+                Where-Object { $_.IPEnabled -and $_.IPAddress }) |
+                ForEach-Object { $_.IPAddress } |
+                Where-Object { $_ -match "^\d+\.\d+" -and $_ -notlike "127.*" -and $_ -notlike "169.254.*" })
+        } catch { }
+    }
+    foreach ($ip in $ips) {
+        Write-Host "  On the LAN:  http://${ip}:1420" -ForegroundColor Green
+    }
+}
+
+function Write-UrlShortcut([string]$Path, [string]$Url) {
+    $folder = Split-Path $Path
+    if (-not (Test-Path $folder)) {
+        New-Item -ItemType Directory -Force -Path $folder | Out-Null
+    }
+    @(
+        "[InternetShortcut]"
+        "URL=$Url"
+    ) | Set-Content -Path $Path -Encoding ASCII
+    Write-Step "shortcut" "wrote" $Path "ok"
 }
 
 function Get-ToolRecord([string]$Key) {
@@ -714,6 +829,26 @@ function Snapshot-InstallState {
         $sn = Scoop-NameFromPath $vlc
         if (-not $sn) { $sn = "vlc" }
         Remember-Tool -Key "vlc" -How $how -Path $vlc -Cmd "vlc" -ScoopName $sn -WingetId "VideoLAN.VLC"
+    }
+    $libmpv = Get-LibmpvPath
+    if ($libmpv) {
+        $prev = Get-ToolRecord "libmpv"
+        $how = $null
+        if ($prev) { $how = $prev.how }
+        if (-not $how) { $how = "github" }
+        Remember-Tool -Key "libmpv" -How $how -Path $libmpv
+    }
+    $gst = Get-GstRoot
+    if ($gst) {
+        $prev = Get-ToolRecord "gstreamer"
+        $how = $null
+        if ($prev) { $how = $prev.how }
+        if (-not $how) { $how = "existing" }
+        Remember-Tool -Key "gstreamer" -How $how -Path $gst
+    }
+    $sidecar = Get-GhoulGstPath
+    if ($sidecar) {
+        Remember-Tool -Key "ghoul-gst" -How "build" -Path $sidecar
     }
     Write-ActionLog ("wrote " + $ToolStatePath)
 }
@@ -967,7 +1102,9 @@ function Get-FfmpegDir {
 
 function Get-MpvPath {
     $hits = @(
+        (Join-Path $Root "tools\mpv\mpv.exe"),
         (Join-Path $env:USERPROFILE "scoop\apps\mpv\current\mpv.exe"),
+        (Join-Path $env:USERPROFILE "scoop\apps\mpv-git\current\mpv.exe"),
         "C:\Program Files\mpv\mpv.exe",
         "C:\Program Files\MPV Player\mpv.exe",
         "C:\Program Files (x86)\mpv\mpv.exe"
@@ -998,6 +1135,113 @@ function Get-VlcPath {
     return First-ExistingApp $hits
 }
 
+function Test-SelfJunction([string]$Path) {
+    if (-not $Path -or -not (Test-Path $Path)) { return $false }
+    try {
+        $item = Get-Item $Path -Force
+        if (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+        $target = @($item.Target)[0]
+        if (-not $target) { return $false }
+        $a = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+        $b = [IO.Path]::GetFullPath($target).TrimEnd('\')
+        return ($a -eq $b)
+    } catch {
+        return $false
+    }
+}
+
+function Remove-SelfJunction([string]$Path) {
+    if (Test-SelfJunction $Path) {
+        Write-ActionLog ("removing self-junction " + $Path)
+        cmd /c "rmdir `"$Path`"" | Out-Null
+    }
+}
+
+function Get-LibmpvPath {
+    $hits = @(
+        (Join-Path $Root "tools\mpv\libmpv-2.dll")
+    )
+    $mpv = Get-MpvPath
+    if ($mpv) {
+        $hits += (Join-Path (Split-Path $mpv) "libmpv-2.dll")
+    }
+    return First-ExistingApp $hits
+}
+
+function Get-GstRoot {
+    $cands = @(
+        (Join-Path $Root "tools\gstreamer"),
+        "S:\toolchains\gstreamer",
+        (Join-Path $env:LOCALAPPDATA "Programs\gstreamer\1.0\mingw_x86_64"),
+        (Join-Path $env:LOCALAPPDATA "Programs\gstreamer\1.0\msvc_x86_64"),
+        "C:\Program Files\gstreamer\1.0\mingw_x86_64",
+        "C:\Program Files\gstreamer\1.0\msvc_x86_64"
+    )
+    foreach ($d in $cands) {
+        if ($d -and (Test-Path (Join-Path $d "bin\gst-launch-1.0.exe"))) { return $d }
+    }
+    return $null
+}
+
+function Get-GhoulGstPath {
+    $p = Join-Path $Root "tools\ghoul\ghoul-gst.exe"
+    if (Test-RealExe $p) { return $p }
+    return $null
+}
+
+function Install-Libmpv {
+    Remove-SelfJunction (Join-Path $Root "tools\mpv")
+    if (Get-LibmpvPath) { return $true }
+    if (-not (Confirm-Yes "Download libmpv (G-houl embed engine)?")) { return $false }
+    if (-not (Test-Cmd "7z")) {
+        if (Test-Cmd "scoop") {
+            Invoke-Logged "scoop install 7zip" { scoop install 7zip }
+            Refresh-Path
+        }
+    }
+    $script = Join-Path $Root "scripts\fetch-libmpv.ps1"
+    Invoke-Logged "fetch libmpv" { & $script -DestDir (Join-Path $Root "tools\mpv") }
+    $dll = Get-LibmpvPath
+    if ($dll) {
+        Remember-Tool -Key "libmpv" -How "github" -Path $dll
+        return $true
+    }
+    return $false
+}
+
+function Install-GStreamer {
+    $root = Get-GstRoot
+    if ($root) { return $true }
+    $script = Join-Path $Root "scripts\fetch-gstreamer-prefix.ps1"
+    $prefix = Join-Path $Root "tools\gstreamer"
+    Invoke-Logged "fetch GStreamer prefix" { & $script -Prefix $prefix }
+    $root = Get-GstRoot
+    if ($root) {
+        Remember-Tool -Key "gstreamer" -How "official" -Path $root
+        return $true
+    }
+    return $false
+}
+
+function Install-GhoulGst {
+    if (Get-GhoulGstPath) { return $true }
+    $gst = Get-GstRoot
+    if (-not $gst) { return $false }
+    $pc = Join-Path $gst "lib\pkgconfig\gstreamer-1.0.pc"
+    if (-not (Test-Path $pc)) {
+        Write-ActionLog "GStreamer prefix has no pkg-config files; cannot compile ghoul-gst"
+        return $false
+    }
+    $script = Join-Path $Root "scripts\build-ghoul-gst.ps1"
+    Invoke-Logged "build ghoul-gst" { & $script -AppRoot $Root -GstRoot $gst }
+    $exe = Get-GhoulGstPath
+    if ($exe) {
+        Remember-Tool -Key "ghoul-gst" -How "build" -Path $exe
+        return $true
+    }
+    return $false
+}
+
 function Get-CargoTargetDir {
     try {
         $json = cargo metadata --format-version 1 --no-deps --offline --manifest-path src-tauri/Cargo.toml 2>$null
@@ -1012,6 +1256,21 @@ function Get-CargoTargetDir {
 
 function Get-CargoReleaseExe {
     $leaf = "epg-monster-studio.exe"
+    $td = Get-CargoTargetDir
+    $candidates = @(
+        (Join-Path $td (Join-Path "x86_64-pc-windows-gnu" (Join-Path "release" $leaf))),
+        (Join-Path $td (Join-Path "release" $leaf)),
+        (Join-Path $Root (Join-Path "src-tauri\target" (Join-Path "x86_64-pc-windows-gnu" (Join-Path "release" $leaf)))),
+        (Join-Path $Root (Join-Path "src-tauri\target" (Join-Path "release" $leaf)))
+    )
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path $c)) { return $c }
+    }
+    return $null
+}
+
+function Get-CargoServerExe {
+    $leaf = "studio-server.exe"
     $td = Get-CargoTargetDir
     $candidates = @(
         (Join-Path $td (Join-Path "x86_64-pc-windows-gnu" (Join-Path "release" $leaf))),
@@ -1170,9 +1429,90 @@ function Build-Launchable {
     Set-UiRow "launchable" "(2/2  100%)" "ready" "ok"
 }
 
-function Install-Studio {
+function Install-StudioServer {
     Reset-Ui "install"
-    foreach ($n in @("Node.js","Rust","gcc","ffmpeg","ffprobe","mpv","VLC","npm","data","UI build","cargo","launchable")) {
+    foreach ($n in @("Node.js","Rust","ffmpeg","ffprobe","mpv","VLC","npm","data","UI build","cargo","launchable")) {
+        $script:UiRows[$n] = @{ State = "..."; Detail = ""; Kind = "wait" }
+    }
+    Show-UiScreen
+    if (-not (Test-Cmd "node")) {
+        Set-UiRow "Node.js" "missing" "need 22+" "fail"
+        $null = Install-Winget -Label "Node.js LTS" -Key "node" -WingetId "OpenJS.NodeJS.LTS" -ExtraIds @("OpenJS.NodeJS")
+        Refresh-Path
+        if (-not (Test-Cmd "node")) { throw "Need Node 22+ on PATH (winget OpenJS.NodeJS.LTS)." }
+    }
+    Set-UiRow "Node.js" "ok" (Get-NativeText { node -v }) "ok"
+    Use-GnuToolchain
+    if (-not (Test-Cmd "cargo")) {
+        Set-UiRow "Rust" "missing" "need cargo" "fail"
+        $null = Install-Winget -Label "Rust (rustup)" -Key "rust" -WingetId "Rustlang.Rustup"
+        Refresh-Path
+        Use-GnuToolchain
+        if (-not (Test-Cmd "cargo")) { throw "Need Rust (cargo) on PATH (winget Rustlang.Rustup)." }
+    }
+    Set-UiRow "Rust" "ok" (Get-NativeText { cargo --version }) "ok"
+    if (-not (Get-FfmpegDir) -and -not (Test-Cmd "scoop")) { $null = Install-ScoopIfNeeded }
+    $ffmpegDir = Get-FfmpegDir
+    if (-not $ffmpegDir) {
+        Set-UiRow "ffmpeg" "missing" "need ffmpeg.exe + ffprobe.exe" "fail"
+        $null = Install-ScoopOrWinget -Label "ffmpeg (includes ffprobe)" -Key "ffmpeg" -ScoopName "ffmpeg" -WingetId "Gyan.FFmpeg"
+        $ffmpegDir = Get-FfmpegDir
+        if (-not $ffmpegDir) { throw "Need ffmpeg and ffprobe." }
+    }
+    Set-UiRow "ffmpeg" "ok" (Join-Path $ffmpegDir "ffmpeg.exe") "ok"
+    Set-UiRow "ffprobe" "ok" (Join-Path $ffmpegDir "ffprobe.exe") "ok"
+    Set-UiRow "mpv" "skipped" "not used on the server host" "skip"
+    Set-UiRow "VLC" "skipped" "not used on the server host" "skip"
+    Ensure-NpmDeps
+    New-Item -ItemType Directory -Force -Path (Join-Path $Root "data") | Out-Null
+    Set-UiRow "data" "ok" (Join-Path $Root "data") "ok"
+    Build-StudioServer
+    Snapshot-InstallState
+    Set-InstallFlavor "server"
+    Remove-OtherFlavorLaunchable "server"
+    $script:UiNote = @"
+server install complete!
+
+->  .\studio.ps1 --makepass   then  .\studio.ps1 --start
+    web UI: http://127.0.0.1:1420  (not http://0.0.0.0:1420)
+    .\studio.ps1 --makekey  then Connect from a desktop
+log: .\install.log
+"@
+    Show-UiScreen
+}
+
+function Build-StudioServer {
+    Use-GnuToolchain
+    Use-NpmBin
+    Ensure-NpmDeps
+    Set-UiRow "UI build" "building" "STUDIO_WEB=1 npm run build" "wait"
+    $env:STUDIO_WEB = "1"
+    try {
+        Invoke-Quiet { npm run build } "npm run build failed"
+    } finally {
+        Remove-Item Env:STUDIO_WEB -ErrorAction SilentlyContinue
+    }
+    Set-UiRow "UI build" "ok" "dist\ (web)" "ok"
+    Set-UiRow "cargo" "building" "studio-server" "wait"
+    $prevEa = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & cargo build -p studio-server --release --target x86_64-pc-windows-gnu --manifest-path src-tauri/Cargo.toml 2>&1 | ForEach-Object { Write-ActionLog "$_" }
+    $ErrorActionPreference = $prevEa
+    if ($LASTEXITCODE -ne 0) { throw "cargo build -p studio-server failed" }
+    $built = Get-CargoServerExe
+    if (-not $built) { throw "studio-server.exe not found in cargo target" }
+    Copy-Item -Force $built $ServerBin
+    Set-UiRow "cargo" "ok" $ServerBin "ok"
+    Set-UiRow "launchable" "ok" "web host (no desktop .exe)" "ok"
+}
+
+function Install-Studio {
+    if ($script:InstallFlavor -eq "server") {
+        Install-StudioServer
+        return
+    }
+    Reset-Ui "install"
+    foreach ($n in @("Node.js","Rust","gcc","ffmpeg","ffprobe","mpv","libmpv","GStreamer","ghoul-gst","VLC","npm","data","UI build","cargo","launchable")) {
         $script:UiRows[$n] = @{ State = "..."; Detail = ""; Kind = "wait" }
     }
     Show-UiScreen
@@ -1246,11 +1586,57 @@ function Install-Studio {
         else { Set-UiRow "VLC" "skipped" "Play needs a path in Settings" "warn" }
     }
 
+    Remove-SelfJunction (Join-Path $Root "tools\mpv")
+    Remove-SelfJunction (Join-Path $Root "tools\ffmpeg")
+    Remove-SelfJunction (Join-Path $Root "tools\gstreamer")
+
+    $libmpv = Get-LibmpvPath
+    if ($libmpv) {
+        Set-UiRow "libmpv" "found" $libmpv "ok"
+    } else {
+        Set-UiRow "libmpv" "missing" "G-houl embed engine" "warn"
+        if (Install-Libmpv) {
+            $libmpv = Get-LibmpvPath
+        }
+        if ($libmpv) { Set-UiRow "libmpv" "ok" $libmpv "ok" }
+        else { Set-UiRow "libmpv" "skipped" "G-houl libmpv engine disabled" "warn" }
+    }
+
+    $gst = Get-GstRoot
+    if ($gst) {
+        Set-UiRow "GStreamer" "found" $gst "ok"
+    } else {
+        Set-UiRow "GStreamer" "missing" "optional G-houl engine" "warn"
+        if (Install-GStreamer) {
+            $gst = Get-GstRoot
+            if ($gst) { Set-UiRow "GStreamer" "ok" $gst "ok" }
+            else { Set-UiRow "GStreamer" "skipped" "prefix not found; IPTV Player embed off" "warn" }
+        } else {
+            Set-UiRow "GStreamer" "skipped" "IPTV Player embed off; Play still uses mpv/VLC" "warn"
+        }
+    }
+
+    $sidecar = Get-GhoulGstPath
+    if ($sidecar) {
+        Set-UiRow "ghoul-gst" "found" $sidecar "ok"
+    } elseif ($gst) {
+        Set-UiRow "ghoul-gst" "building" "cargo build ghoul-gst" "wait"
+        if (Install-GhoulGst) {
+            $sidecar = Get-GhoulGstPath
+        }
+        if ($sidecar) { Set-UiRow "ghoul-gst" "ok" $sidecar "ok" }
+        else { Set-UiRow "ghoul-gst" "skipped" "build failed; see .\install.log" "warn" }
+    } else {
+        Set-UiRow "ghoul-gst" "skipped" "needs GStreamer prefix" "warn"
+    }
+
     Ensure-NpmDeps
     New-Item -ItemType Directory -Force -Path (Join-Path $Root "data") | Out-Null
     Set-UiRow "data" "ok" (Join-Path $Root "data") "ok"
     Build-Launchable
     Snapshot-InstallState
+    Set-InstallFlavor "desktop"
+    Remove-OtherFlavorLaunchable "desktop"
     $script:UiNote = @"
 install complete!
 
@@ -1282,6 +1668,17 @@ function Write-Shortcut([string]$Path, [string]$Target) {
 function Install-Shortcuts {
     Reset-Ui "shortcuts"
     Show-UiScreen
+    if ((Get-InstallFlavor) -eq "server") {
+        if (-not (Test-Path $ServerBin)) {
+            throw "Need $ServerBin. Run .\studio.ps1 --install server first."
+        }
+        Write-UrlShortcut (Get-DesktopUrl) "http://127.0.0.1:1420"
+        Write-UrlShortcut (Get-StartUrl) "http://127.0.0.1:1420"
+        Write-Host ""
+        Write-Host "  shortcuts open http://127.0.0.1:1420  (start the server with --start)" -ForegroundColor Green
+        Write-Host ""
+        return
+    }
     if (-not (Test-Path $Launchable)) {
         Write-Step "launchable" "missing" "running --install first" "warn"
         Install-Studio
@@ -1325,33 +1722,46 @@ function Test-NodeInstalled {
 function Uninstall-Studio {
     Reset-Ui "uninstall"
     Refresh-Path
-    foreach ($n in @("app","Desktop","Start Menu","exe","Node.js","Rust","ffmpeg","mpv","VLC")) {
+    foreach ($n in @("app","Desktop","Start Menu","exe","Node.js","Rust","ffmpeg","mpv","libmpv","GStreamer","ghoul-gst","VLC")) {
         $script:UiRows[$n] = @{ State = "..."; Detail = ""; Kind = "wait" }
     }
     Show-UiScreen
     Out-UiLine "" "Gray"
-    Out-UiLine "  What do you want to uninstall?  .\data is never deleted." "Yellow"
-    if (Confirm-Yes "Remove studio exe and Desktop / Start Menu shortcuts?") {
+    Out-UiLine "  What do you want to uninstall?  .\data is never deleted (databases, web-auth.json, api-keys.json)." "Yellow"
+    if (Confirm-Yes "Remove studio binaries (desktop + studio-server) and Desktop / Start Menu shortcuts?") {
         Stop-Studio
         if (Test-Path (Get-DesktopLnk)) {
             Remove-Item -Force (Get-DesktopLnk) -ErrorAction SilentlyContinue
             Set-UiRow "Desktop" "removed" (Get-DesktopLnk) "ok"
+        } elseif (Test-Path (Get-DesktopUrl)) {
+            Remove-Item -Force (Get-DesktopUrl) -ErrorAction SilentlyContinue
+            Set-UiRow "Desktop" "removed" (Get-DesktopUrl) "ok"
         } else { Set-UiRow "Desktop" "absent" "" "skip" }
         if (Test-Path (Get-StartLnk)) {
             Remove-Item -Force (Get-StartLnk) -ErrorAction SilentlyContinue
             Set-UiRow "Start Menu" "removed" (Get-StartLnk) "ok"
+        } elseif (Test-Path (Get-StartUrl)) {
+            Remove-Item -Force (Get-StartUrl) -ErrorAction SilentlyContinue
+            Set-UiRow "Start Menu" "removed" (Get-StartUrl) "ok"
         } else { Set-UiRow "Start Menu" "absent" "" "skip" }
+        Remove-IfExists (Get-DesktopUrl) | Out-Null
+        Remove-IfExists (Get-StartUrl) | Out-Null
         if (Test-Path $Launchable) {
             Remove-Item -Force $Launchable -ErrorAction SilentlyContinue
             Set-UiRow "exe" "removed" $Launchable "ok"
         } else { Set-UiRow "exe" "absent" "" "skip" }
+        if (Test-Path $ServerBin) {
+            Remove-Item -Force $ServerBin -ErrorAction SilentlyContinue
+            Write-Step "studio-server" "removed" $ServerBin "ok"
+        }
         if (Test-Path $WebViewDll) {
             Remove-Item -Force $WebViewDll -ErrorAction SilentlyContinue
         }
         if (Test-Path $PidFile) {
             Remove-Item -Force $PidFile -ErrorAction SilentlyContinue
         }
-        Set-UiRow "app" "removed" "exe + shortcuts" "ok"
+        Set-InstallFlavor ""
+        Set-UiRow "app" "removed" "binaries + shortcuts" "ok"
     } else {
         Set-UiRow "app" "kept" "" "skip"
         Set-UiRow "Desktop" "kept" "" "skip"
@@ -1389,17 +1799,104 @@ function Uninstall-Studio {
         else { Set-UiRow "VLC" "removed" "" "ok" }
     } else { Set-UiRow "VLC" "kept" "" "skip" }
 
-    $script:UiNote = "uninstall complete`n`n.\data was not deleted.`nlog: .\uninstall.log"
+    $libmpvDll = Join-Path $Root "tools\mpv\libmpv-2.dll"
+    if (((Get-LibmpvPath) -or (Get-ToolRecord "libmpv")) -and (Confirm-No "Remove staged libmpv (tools\mpv\libmpv-2.dll) too?")) {
+        if (Test-Path $libmpvDll) {
+            Remove-Item -Force $libmpvDll -ErrorAction SilentlyContinue
+        }
+        Forget-Tool "libmpv"
+        if (Get-LibmpvPath) { Set-UiRow "libmpv" "kept" "still present next to mpv" "warn" }
+        else { Set-UiRow "libmpv" "removed" $libmpvDll "ok" }
+    } else { Set-UiRow "libmpv" "kept" "" "skip" }
+
+    $sidecar = Join-Path $Root "tools\ghoul\ghoul-gst.exe"
+    if (((Get-GhoulGstPath) -or (Get-ToolRecord "ghoul-gst")) -and (Confirm-No "Remove G-houl GStreamer sidecar (tools\ghoul\ghoul-gst.exe) too?")) {
+        if (Test-Path $sidecar) {
+            Remove-Item -Force $sidecar -ErrorAction SilentlyContinue
+        }
+        Forget-Tool "ghoul-gst"
+        if (Get-GhoulGstPath) { Set-UiRow "ghoul-gst" "failed" "still present" "fail" }
+        else { Set-UiRow "ghoul-gst" "removed" $sidecar "ok" }
+    } else { Set-UiRow "ghoul-gst" "kept" "" "skip" }
+
+    $gstRec = Get-ToolRecord "gstreamer"
+    $gstHow = if ($gstRec) { [string]$gstRec.how } else { "" }
+    $gstPrefix = Join-Path $Root "tools\gstreamer"
+    $gstOurs = ($gstHow -eq "official") -and (Test-Path (Join-Path $gstPrefix "bin\gst-launch-1.0.exe"))
+    if ($gstOurs -and (Confirm-No "Uninstall GStreamer prefix under tools\gstreamer too?")) {
+        $unins = Join-Path $gstPrefix "unins000.exe"
+        if (Test-Path $unins) {
+            Invoke-Logged "GStreamer unins000.exe" { Start-Process -FilePath $unins -ArgumentList "/VERYSILENT","/NORESTART" -Wait }
+        } else {
+            Remove-Item -Recurse -Force $gstPrefix -ErrorAction SilentlyContinue
+        }
+        Forget-Tool "gstreamer"
+        if (Get-GstRoot) { Set-UiRow "GStreamer" "kept" "another prefix is still present" "warn" }
+        else { Set-UiRow "GStreamer" "removed" $gstPrefix "ok" }
+    } else { Set-UiRow "GStreamer" "kept" "" "skip" }
+
+    $script:UiNote = "uninstall complete`n`n.\data was not deleted (databases, web-auth.json, api-keys.json, logs).`nlog: .\uninstall.log"
+    Show-UiScreen
+}
+
+function Invoke-MakeKey {
+    Assert-ServerFeature "--makekey"
+    Reset-Ui "makekey"
+    Show-UiScreen
+    $env:EPG_MONSTER_HOME = $Root
+    if (-not (Test-Path $ServerBin)) {
+        Write-Step "server" "missing" "building studio-server" "warn"
+        Build-StudioServer
+    }
+    if (-not (Test-Path $ServerBin)) {
+        throw "Need $ServerBin. Run .\studio.ps1 --install server first."
+    }
+    Write-Phase "desktop API key"
+    if ($script:MakeKeyName) {
+        & $ServerBin --makekey $script:MakeKeyName
+    } else {
+        & $ServerBin --makekey
+    }
+    if ($LASTEXITCODE -ne 0) { throw "studio-server --makekey failed" }
+    $script:UiNote = "Paste the key in desktop Settings → This computer → Connect. It is not shown again."
+    Show-UiScreen
+}
+
+function Invoke-MakePass {
+    Assert-ServerFeature "--makepass"
+    Reset-Ui "makepass"
+    Show-UiScreen
+    $env:EPG_MONSTER_HOME = $Root
+    if (-not (Test-Path $ServerBin)) {
+        Write-Step "server" "missing" "building studio-server" "warn"
+        Build-StudioServer
+    }
+    if (-not (Test-Path $ServerBin)) {
+        throw "Need $ServerBin. Run .\studio.ps1 --install server first."
+    }
+    Write-Phase "temporary admin password"
+    if ($script:MakePassValue) {
+        & $ServerBin --makepass $script:MakePassValue
+    } else {
+        & $ServerBin --makepass
+    }
+    if ($LASTEXITCODE -ne 0) { throw "studio-server --makepass failed" }
+    $script:UiNote = "Sign in as admin on the web UI. You must set a new password on first login."
     Show-UiScreen
 }
 
 function Start-Studio {
-    if (Test-Running) {
-        $procId = (Get-Content $PidFile | Select-Object -First 1).Trim()
-        Write-Step "app" "already running" "pid $procId" "ok"
+    $env:EPG_MONSTER_HOME = $Root
+    if ($script:StartHeadless) { Assert-ServerFeature "--start headless" }
+    $want = "desktop"
+    if ((Get-InstallFlavor) -eq "server") {
+        $want = if ($script:StartHeadless) { "headless" } else { "server" }
+    }
+    if (Ensure-StartMode $want) { return }
+    if ((Get-InstallFlavor) -eq "server") {
+        Start-StudioServer
         return
     }
-    $env:EPG_MONSTER_HOME = $Root
     Use-NpmBin
     if (Test-Path $Launchable) {
         Write-Phase "build UI (dist\)"
@@ -1422,25 +1919,105 @@ function Start-Studio {
     Write-Step "app" "started" "pid $($p.Id) cargo run" "ok"
 }
 
+function Start-StudioServer {
+    Use-NpmBin
+    if (-not (Test-Path $ServerBin)) {
+        Write-Step "server" "missing" "building studio-server" "warn"
+        Build-StudioServer
+    }
+    $headless = [bool]$script:StartHeadless
+    if (-not $headless -and -not (Test-Path (Join-Path $Root "dist\index.html"))) {
+        Write-Phase "build UI (web dist\)"
+        $env:STUDIO_WEB = "1"
+        try { Invoke-Quiet { npm run build } "npm run build failed" }
+        finally { Remove-Item Env:STUDIO_WEB -ErrorAction SilentlyContinue }
+    }
+    $env:STUDIO_BIND = "0.0.0.0:1420"
+    if ($headless) {
+        Write-Phase "start headless API"
+        $env:STUDIO_HEADLESS = "1"
+        Remove-Item Env:STUDIO_UI_DIR -ErrorAction SilentlyContinue
+        $p = Start-Process -FilePath $ServerBin -ArgumentList "--headless" -WorkingDirectory $Root -PassThru
+        Set-Content -Path $PidFile -Value $p.Id
+        if (-not (Get-RecordedFlavor)) { Set-InstallFlavor "server" }
+        Write-Step "app" "started" "pid $($p.Id)  headless API :1420" "ok"
+        Write-Host "  epg.monster studio API (headless) — Connect from desktop Settings" -ForegroundColor Green
+        Write-ServerListenHint
+        return
+    }
+    Write-Phase "start web host"
+    Remove-Item Env:STUDIO_HEADLESS -ErrorAction SilentlyContinue
+    $env:STUDIO_UI_DIR = (Join-Path $Root "dist")
+    $p = Start-Process -FilePath $ServerBin -WorkingDirectory $Root -PassThru
+    Set-Content -Path $PidFile -Value $p.Id
+    if (-not (Get-RecordedFlavor)) { Set-InstallFlavor "server" }
+    Write-Step "app" "started" "pid $($p.Id)  http://127.0.0.1:1420" "ok"
+    Write-Host "  epg.monster studio (web)" -ForegroundColor Green
+    Write-ServerListenHint
+}
+
 $wantInstall = $false
 $wantShortcuts = $false
 $wantUninstall = $false
 $wantStart = $false
 $wantStop = $false
+$wantMakePass = $false
+$script:MakePassValue = $null
+$wantMakeKey = $false
+$script:MakeKeyName = $null
+$script:StartHeadless = $false
 $wantHelp = $false
 $unknown = @()
 if ($args.Count -eq 0) {
     $wantInstall = $true
     $wantStart = $true
 } else {
-    foreach ($a in $args) {
+    for ($i = 0; $i -lt $args.Count; $i++) {
+        $a = $args[$i]
         switch -Regex ($a) {
-            "^--install$|^install$" { $wantInstall = $true }
+            "^--install$|^install$" {
+                $wantInstall = $true
+                if (($i + 1) -lt $args.Count -and $args[$i + 1] -match "^(server|desktop)$") {
+                    $script:InstallFlavor = $args[$i + 1].ToLowerInvariant()
+                    $i++
+                }
+            }
             "^--shortcuts$|^shortcuts$" { $wantShortcuts = $true }
             "^--uninstall$|^uninstall$" { $wantUninstall = $true }
-            "^--start$|^start$" { $wantStart = $true }
+            "^--start$|^start$" {
+                $wantStart = $true
+                if (($i + 1) -lt $args.Count -and $args[$i + 1] -match "^(headless|--headless)$") {
+                    $script:StartHeadless = $true
+                    $i++
+                }
+            }
+            "^--headless$|^headless$" {
+                $script:StartHeadless = $true
+                $wantStart = $true
+            }
+            "^--makepass$|^makepass$" {
+                $wantMakePass = $true
+                if (($i + 1) -lt $args.Count -and $args[$i + 1] -notmatch "^--") {
+                    $script:MakePassValue = $args[$i + 1]
+                    $i++
+                }
+            }
+            "^--makekey$|^makekey$" {
+                $wantMakeKey = $true
+                if (($i + 1) -lt $args.Count -and $args[$i + 1] -notmatch "^--") {
+                    $script:MakeKeyName = $args[$i + 1]
+                    $i++
+                }
+            }
             "^--stop$|^stop$" { $wantStop = $true }
-            "^--restart$|^restart$" { $wantStop = $true; $wantStart = $true }
+            "^--restart$|^restart$" {
+                $wantStop = $true
+                $wantStart = $true
+                if (($i + 1) -lt $args.Count -and $args[$i + 1] -match "^(headless|--headless)$") {
+                    $script:StartHeadless = $true
+                    $i++
+                }
+            }
             "^--help$|^-h$|^help$" { $wantHelp = $true }
             default { $unknown += $a }
         }
@@ -1458,6 +2035,8 @@ try {
     if ($wantUninstall) { Start-ActionLog "uninstall"; Uninstall-Studio }
     if ($wantInstall) { Start-ActionLog "install"; Install-Studio }
     if ($wantShortcuts) { Start-ActionLog "shortcuts"; Install-Shortcuts }
+    if ($wantMakePass) { Start-ActionLog "makepass"; Invoke-MakePass }
+    if ($wantMakeKey) { Start-ActionLog "makekey"; Invoke-MakeKey }
     if ($wantStart) { Start-ActionLog "start"; Start-Studio }
 } finally {
     try { [Console]::CursorVisible = $true } catch { }

@@ -33,7 +33,7 @@ The system SHALL show a splash window on `#0C0C10` with the brand logo, version 
 - AND epgshare `.txt` catalogs are not fetched
 
 ### Requirement: Navigation items and order
-The system SHALL provide a left pane 220px wide with a clickable logo (About) and these items in this order: Add Sources, Playlist Editor, EPG Audit, Logo Audit, Stream Audit, Managed Output, TV Tuner; footer: **Check For Updates**, then Settings. IPTV Player (G-houl) is v3.
+The system SHALL provide a left pane 220px wide with a clickable logo (About) and these items in this order: Add Sources, Playlist Editor, EPG Audit, Logo Audit, Stream Audit, Managed Output, TV Tuner, IPTV Player; footer: **Check For Updates**, then Settings. The web host hides native window caption buttons.
 
 #### Scenario: Default page
 - GIVEN a fresh session
