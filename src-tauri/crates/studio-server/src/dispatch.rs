@@ -777,18 +777,24 @@ fn check_update() -> Result<Value, String> {
         Ok(rel) => {
             let newer = remote_is_newer(&rel.tag, VERSION);
             let flavor = studio_core::update::flavor_from_process();
-            let asset = studio_core::update::pick_binary_asset(&rel, flavor);
+            let asset_name = studio_core::update::pick_binary_asset(&rel, flavor)
+                .map(|a| a.name.clone());
+            let release_url = if rel.html_url.is_empty() {
+                GITHUB_RELEASES_LATEST.to_string()
+            } else {
+                rel.html_url.clone()
+            };
             ok(json!({
                 "current": current,
                 "displayVersion": display_version(),
                 "edition": EDITION,
                 "latest": rel.tag,
                 "updateAvailable": newer,
-                "releaseUrl": if rel.html_url.is_empty() { GITHUB_RELEASES_LATEST } else { &rel.html_url },
+                "releaseUrl": release_url,
                 "notes": rel.body,
                 "error": null,
-                "canApply": newer && asset.is_some(),
-                "assetName": asset.map(|a| a.name.clone()),
+                "canApply": newer && asset_name.is_some(),
+                "assetName": asset_name,
             }))
         }
         Err(e) => ok(json!({

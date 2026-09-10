@@ -723,7 +723,7 @@ async fn check_studio_update() -> StudioUpdateDto {
     let current = VERSION.to_string();
     match latest_github_release() {
         Ok(rel) => {
-            let notes = rel.body.map(|b| {
+            let notes = rel.body.as_deref().map(|b| {
                 let t = b.trim();
                 if t.chars().count() > 400 {
                     format!("{}…", t.chars().take(400).collect::<String>())
@@ -733,7 +733,8 @@ async fn check_studio_update() -> StudioUpdateDto {
             });
             let newer = remote_is_newer(&rel.tag, VERSION);
             let flavor = studio_core::update::flavor_from_process();
-            let asset = studio_core::update::pick_binary_asset(&rel, flavor);
+            let asset_name = studio_core::update::pick_binary_asset(&rel, flavor)
+                .map(|a| a.name.clone());
             StudioUpdateDto {
                 current,
                 display_version: display_version(),
@@ -743,12 +744,12 @@ async fn check_studio_update() -> StudioUpdateDto {
                 release_url: if rel.html_url.is_empty() {
                     GITHUB_RELEASES_LATEST.to_string()
                 } else {
-                    rel.html_url
+                    rel.html_url.clone()
                 },
                 notes,
                 error: None,
-                can_apply: newer && asset.is_some(),
-                asset_name: asset.map(|a| a.name.clone()),
+                can_apply: newer && asset_name.is_some(),
+                asset_name,
             }
         }
         Err(e) => StudioUpdateDto {
