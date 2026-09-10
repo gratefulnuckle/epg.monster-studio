@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
-    "@tauri-apps/plugin-dialog": "^2.4.0",
+    "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-opener": "^2.5.0",
     "hls.js": "^1.7.2",
     "mpegts.js": "^1.8.2"

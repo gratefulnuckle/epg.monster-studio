@@ -25,8 +25,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Unix cargo target dir
-        if: runner.os != 'Windows'
+      - name: Cargo target dir
+        shell: bash
         run: echo "CARGO_TARGET_DIR=${{ github.workspace }}/src-tauri/target" >> "$GITHUB_ENV"
       - name: Linux deps
         if: runner.os == 'Linux'
